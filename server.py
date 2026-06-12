@@ -797,7 +797,7 @@ def is_admin() -> bool:
 
 def persistence_installed() -> bool:
     completed = subprocess.run(
-        ["schtasks", "/Query", "/TN", "ClearGuard AV Agent"],
+        ["schtasks", "/Query", "/TN", "ClearGuard Agent"],
         capture_output=True,
         text=True,
         timeout=5,

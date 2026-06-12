@@ -16,12 +16,12 @@ if (-not $pythonw) {
   $pythonw = $python
 }
 
-$taskName = "ClearGuard AV Agent"
+$taskName = "ClearGuard Agent"
 $action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$server`"" -WorkingDirectory $root
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Days 365)
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description "Starts the ClearGuard local AV agent when the user signs in." -Force | Out-Null
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description "Starts the ClearGuard local antivirus agent when the user signs in." -Force | Out-Null
 
 Start-ScheduledTask -TaskName $taskName
 

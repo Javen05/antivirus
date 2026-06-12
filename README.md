@@ -1,4 +1,4 @@
-# ClearGuard AV
+# ClearGuard
 
 ClearGuard is a local, layperson-readable Windows security console. It scans real files, tracks quarantine, shows live outbound TCP connections, and explains local security decisions in plain English.
 
@@ -46,7 +46,7 @@ To make ClearGuard start again after you power off and sign back into Windows:
 .\scripts\install-clearguard.ps1
 ```
 
-This creates a Windows Scheduled Task named `ClearGuard AV Agent` that starts the local agent at user logon. Remove it with:
+This creates a Windows Scheduled Task named `ClearGuard Agent` that starts the local agent at user logon. Remove it with:
 
 ```powershell
 .\scripts\uninstall-clearguard.ps1

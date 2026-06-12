@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$taskName = "ClearGuard AV Agent"
+$taskName = "ClearGuard Agent"
 
 if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
   Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
