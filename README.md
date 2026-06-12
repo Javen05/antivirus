@@ -81,7 +81,6 @@ Limitations in this prototype:
 - Microsoft Defender definition updates and quick scans from the ClearGuard console.
 - SHA-256 hashing for scanned files.
 - Local SHA-256 and domain blocklists.
-- EICAR antivirus test string recognition for verifying the scanner path only.
 - Script behavior heuristics for encoded PowerShell, remote code download chains, `certutil`, `mshta`, `rundll32`, backup deletion, and Defender-disabling attempts.
 - Risk elevation for executable/script-like files in user-writable launch locations.
 - Real quarantine with restore/delete metadata.

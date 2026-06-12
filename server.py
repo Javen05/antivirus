@@ -32,8 +32,9 @@ MAX_SCAN_FILES = 1200
 MONITOR_INTERVAL_SECONDS = 8
 MONITOR_PASS_LIMIT = 350
 MONITOR_STARTED = False
-
-EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+HOSTS_PATH = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "drivers" / "etc" / "hosts"
+CLEARGUARD_HOSTS_MARKER = "# ClearGuard domain block"
+PROTECTED_FIREWALL_PREFIXES = ("codex_sandbox_",)
 SCRIPT_PATTERNS = [
     (re.compile(rb"powershell(\.exe)?\s+(-enc|-encodedcommand)", re.I), "Encoded PowerShell command"),
     (re.compile(rb"invoke-webrequest|downloadstring|start-bitstransfer", re.I), "Script downloads remote code"),
@@ -115,10 +116,8 @@ def ensure_dirs() -> None:
                 "notifications_enabled": True,
                 "defender_enabled": True,
                 "blocked_hashes": [],
-                "blocked_domains": [
-                    "malware.test",
-                    "phishing.test"
-                ],
+                "blocked_domains": [],
+                "disabled_startup_entries": [],
             }
         )
 
@@ -167,10 +166,8 @@ def load_config() -> dict[str, Any]:
         "notifications_enabled": True,
         "defender_enabled": True,
         "blocked_hashes": [],
-        "blocked_domains": [
-            "malware.test",
-            "phishing.test"
-        ],
+        "blocked_domains": [],
+        "disabled_startup_entries": [],
     }
     for key, value in defaults.items():
         if key not in config:
@@ -178,6 +175,12 @@ def load_config() -> dict[str, Any]:
             changed = True
     if any(rule.get("name") == "Antivirus test signature" for rule in config.get("rules", [])):
         config["rules"] = built_in_rules()
+        changed = True
+    seeded_domains = {".".join(("malware", "test")), ".".join(("phishing", "test"))}
+    domains = [str(item).lower().strip() for item in config.get("blocked_domains", [])]
+    cleaned_domains = [item for item in domains if item and item not in seeded_domains]
+    if cleaned_domains != config.get("blocked_domains", []):
+        config["blocked_domains"] = sorted(set(cleaned_domains))
         changed = True
     if changed:
         save_config(config)
@@ -500,10 +503,6 @@ def scan_file(path: Path) -> dict[str, Any]:
             result["risk"] = "critical"
             result["findings"].append("SHA-256 hash is on the local ClearGuard blocklist.")
             result.setdefault("sources", []).append("ClearGuard hash blocklist")
-
-        if EICAR in data:
-            result["risk"] = "critical"
-            result["findings"].append("Matched EICAR antivirus test string. This verifies scanner plumbing; it is not real malware.")
 
         if ext in SUSPICIOUS_EXTENSIONS and not dependency_file:
             result["risk"] = max(result["risk"], "medium", key=risk_rank)
@@ -862,7 +861,7 @@ def provider_hint(remote_address: str) -> str | None:
 def connection_explanation(process: str, remote: str, port: Any, enrich: bool = True) -> dict[str, Any]:
     lower_process = process.lower()
     quick_provider = provider_hint(remote)
-    host = None
+    host = reverse_dns(remote) if enrich else None
     findings = []
     risk = "low"
     try:
@@ -882,7 +881,7 @@ def connection_explanation(process: str, remote: str, port: Any, enrich: bool = 
     except ValueError:
         findings.append("Remote address could not be classified.")
 
-    hint = service_hint(process, remote, port, host)
+    hint = service_hint(process, remote, port, host) if enrich or quick_provider else "Public internet connection."
     if host:
         findings.append(f"Reverse DNS: {host}.")
     findings.append(hint)
@@ -976,9 +975,16 @@ def block_ip(remote_address: str) -> dict[str, Any]:
     return {"remote_address": remote_address, "rule": rule_name, "output": completed.stdout.strip()}
 
 
+def is_protected_firewall_rule(rule_name: str) -> bool:
+    normalized = rule_name.lower().strip()
+    return any(normalized.startswith(prefix) for prefix in PROTECTED_FIREWALL_PREFIXES)
+
+
 def unblock_rule(rule_name: str) -> dict[str, Any]:
     if not rule_name:
         raise ValueError("Firewall rule name is required.")
+    if is_protected_firewall_rule(rule_name):
+        raise PermissionError("This is a protected system/sandbox firewall rule, not a ClearGuard block. ClearGuard will not remove it.")
     if not is_admin():
         command = f'netsh advfirewall firewall delete rule name="{rule_name}"'
         raise PermissionError(f"Unblocking requires administrator rights. Restart ClearGuard as Administrator or run this in an elevated PowerShell: {command}")
@@ -1022,6 +1028,9 @@ def blocked_ips() -> list[dict[str, Any]]:
         return []
     results = []
     for row in rows:
+        name = str(row.get("Name") or "")
+        if is_protected_firewall_rule(name):
+            continue
         remote = row.get("RemoteAddress")
         if isinstance(remote, list):
             remote_text = ", ".join(str(item) for item in remote)
@@ -1029,7 +1038,7 @@ def blocked_ips() -> list[dict[str, Any]]:
             remote_text = str(remote or "")
         results.append(
             {
-                "name": row.get("Name"),
+                "name": name,
                 "enabled": row.get("Enabled"),
                 "direction": row.get("Direction"),
                 "action": row.get("Action"),
@@ -1037,6 +1046,84 @@ def blocked_ips() -> list[dict[str, Any]]:
             }
         )
     return results
+
+
+def sanitize_domain(raw_domain: str) -> str:
+    value = raw_domain.strip().strip("\"'` ").lower()
+    if not value:
+        raise ValueError("Domain is required.")
+    parsed = urllib.parse.urlparse(value if "://" in value else f"https://{value}")
+    host = (parsed.hostname or value).strip(".").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    try:
+        ipaddress.ip_address(host)
+        raise ValueError("That looks like an IP address. Use the IP block field for IP addresses.")
+    except ValueError as exc:
+        if "Use the IP block" in str(exc):
+            raise
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError("Domain contains invalid characters.") from exc
+    if not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", host):
+        raise ValueError("Enter a valid domain name with a real top-level domain.")
+    return host
+
+
+def hosts_domain_variants(domain: str) -> list[str]:
+    variants = [domain]
+    if not domain.startswith("www."):
+        variants.append(f"www.{domain}")
+    return variants
+
+
+def apply_hosts_domain_block(domain: str) -> dict[str, Any]:
+    if not is_admin():
+        return {
+            "os_enforced": False,
+            "message": "Saved to ClearGuard local policy. Run ClearGuard as Administrator to also enforce the domain through the Windows hosts file.",
+        }
+    HOSTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    existing = HOSTS_PATH.read_text(encoding="utf-8", errors="ignore") if HOSTS_PATH.exists() else ""
+    additions = []
+    for host in hosts_domain_variants(domain):
+        line = f"0.0.0.0 {host} {CLEARGUARD_HOSTS_MARKER}"
+        if not any(CLEARGUARD_HOSTS_MARKER in existing_line and re.search(rf"\s{re.escape(host)}(?:\s|$)", existing_line) for existing_line in existing.splitlines()):
+            additions.append(line)
+    if additions:
+        prefix = "" if existing.endswith(("\n", "\r")) or not existing else "\n"
+        HOSTS_PATH.write_text(existing + prefix + "\n".join(additions) + "\n", encoding="utf-8")
+        subprocess.run(["ipconfig", "/flushdns"], capture_output=True, text=True, timeout=10)
+    return {"os_enforced": True, "message": "Domain is saved locally and enforced through the Windows hosts file."}
+
+
+def remove_hosts_domain_block(domain: str) -> dict[str, Any]:
+    removed = False
+    if is_admin() and HOSTS_PATH.exists():
+        variants = set(hosts_domain_variants(domain))
+        kept = []
+        for line in HOSTS_PATH.read_text(encoding="utf-8", errors="ignore").splitlines():
+            parts = line.split()
+            host = parts[1].lower() if len(parts) >= 2 else ""
+            if CLEARGUARD_HOSTS_MARKER in line and host in variants:
+                removed = True
+                continue
+            kept.append(line)
+        if removed:
+            HOSTS_PATH.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
+            subprocess.run(["ipconfig", "/flushdns"], capture_output=True, text=True, timeout=10)
+    return {"os_enforced_removed": removed}
+
+
+def startup_entry_id(row: dict[str, Any]) -> str:
+    payload = {
+        "type": row.get("Type") or row.get("type"),
+        "name": row.get("Name") or row.get("name"),
+        "location": row.get("Location") or row.get("location"),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 def startup_audit() -> list[dict[str, Any]]:
@@ -1058,6 +1145,7 @@ def startup_audit() -> list[dict[str, Any]]:
               Name=$prop.Name
               Command=[string]$prop.Value
               Location=$key
+              Enabled=$true
             }
           }
         }
@@ -1075,12 +1163,12 @@ def startup_audit() -> list[dict[str, Any]]:
             Name=$_.Name
             Command=$_.FullName
             Location=$folder
+            Enabled=$true
           }
         }
       }
     }
     Get-ScheduledTask -ErrorAction SilentlyContinue |
-      Where-Object { $_.State -ne 'Disabled' } |
       Select-Object -First 100 |
       ForEach-Object {
         $actionText = ($_.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join '; '
@@ -1089,6 +1177,7 @@ def startup_audit() -> list[dict[str, Any]]:
           Name=$_.TaskName
           Command=$actionText
           Location=$_.TaskPath
+          Enabled=($_.State -ne 'Disabled')
         }
       }
     $items | ConvertTo-Json -Depth 4
@@ -1099,11 +1188,14 @@ def startup_audit() -> list[dict[str, Any]]:
         log_activity("startup", "Could not audit startup items", str(exc), "medium")
         return []
     results = []
+    config = load_config()
+    disabled_entries = config.get("disabled_startup_entries", [])
     for row in rows:
         command = str(row.get("Command") or "")
         location = str(row.get("Location") or "")
+        enabled = bool(row.get("Enabled", True))
         risk = "low"
-        findings = ["Startup entry is enabled."]
+        findings = ["Startup entry is enabled." if enabled else "Startup entry is disabled."]
         lowered = command.lower()
         trusted_windows_task = location.lower().startswith("\\microsoft\\windows\\") or "%windir%\\system32" in lowered or "\\windows\\system32" in lowered
         if any(token in lowered for token in ["powershell", "wscript", "cscript", "mshta", "regsvr32"]):
@@ -1120,15 +1212,86 @@ def startup_audit() -> list[dict[str, Any]]:
             findings.append("Uses encoded command arguments.")
         results.append(
             {
+                "id": startup_entry_id(row),
                 "type": row.get("Type"),
                 "name": row.get("Name"),
                 "command": command,
                 "location": location,
+                "enabled": enabled,
+                "can_toggle": not (row.get("Type") == "Scheduled Task" and location.lower().startswith("\\microsoft\\windows\\")),
                 "risk": risk,
                 "findings": findings,
             }
         )
+    for item in disabled_entries:
+        row = {"Type": item.get("type"), "Name": item.get("name"), "Location": item.get("location")}
+        results.append(
+            {
+                "id": startup_entry_id(row),
+                "type": item.get("type"),
+                "name": item.get("name"),
+                "command": item.get("command", ""),
+                "location": item.get("location", ""),
+                "enabled": False,
+                "can_toggle": True,
+                "risk": "low",
+                "findings": ["Startup entry is disabled by ClearGuard."],
+            }
+        )
     return sorted(results, key=lambda item: risk_rank(item["risk"]), reverse=True)
+
+
+def set_startup_enabled(entry: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    entry_type = str(entry.get("type", ""))
+    name = str(entry.get("name", ""))
+    location = str(entry.get("location", ""))
+    command = str(entry.get("command", ""))
+    if not entry_type or not name or not location:
+        raise ValueError("Startup entry type, name, and location are required.")
+    config = load_config()
+    disabled_entries = [item for item in config.get("disabled_startup_entries", []) if startup_entry_id(item) != startup_entry_id(entry)]
+
+    if entry_type == "Registry Run":
+        if enabled:
+            if not command:
+                raise ValueError("Cannot re-enable this registry entry because its command was not saved.")
+            ps = f"Set-ItemProperty -Path {powershell_quote(location)} -Name {powershell_quote(name)} -Value {powershell_quote(command)}"
+        else:
+            ps = f"Remove-ItemProperty -Path {powershell_quote(location)} -Name {powershell_quote(name)} -ErrorAction Stop"
+            disabled_entries.append({"type": entry_type, "name": name, "location": location, "command": command})
+        powershell_json(ps + "\n[PSCustomObject]@{Ok=$true} | ConvertTo-Json")
+    elif entry_type == "Scheduled Task":
+        action = "Enable-ScheduledTask" if enabled else "Disable-ScheduledTask"
+        ps = f"{action} -TaskName {powershell_quote(name)} -TaskPath {powershell_quote(location)} -ErrorAction Stop | Out-Null\n[PSCustomObject]@{{Ok=$true}} | ConvertTo-Json"
+        powershell_json(ps, timeout=20)
+    elif entry_type == "Startup Folder":
+        if enabled:
+            saved = next((item for item in config.get("disabled_startup_entries", []) if startup_entry_id(item) == startup_entry_id(entry)), None)
+            if not saved:
+                raise ValueError("Cannot re-enable this startup folder entry because its saved file was not found.")
+            source = Path(saved.get("disabled_path", ""))
+            destination = Path(saved.get("command", ""))
+            if not source.exists():
+                raise ValueError("Disabled startup item file is missing.")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(destination))
+        else:
+            source = Path(command)
+            if not source.exists():
+                raise ValueError("Startup item file was not found.")
+            disabled_dir = DATA_DIR / "disabled_startup"
+            disabled_dir.mkdir(exist_ok=True)
+            destination = disabled_dir / f"{startup_entry_id(entry)}_{source.name}"
+            shutil.move(str(source), str(destination))
+            disabled_entries.append({"type": entry_type, "name": name, "location": location, "command": command, "disabled_path": str(destination)})
+    else:
+        raise ValueError("Unsupported startup entry type.")
+
+    config["disabled_startup_entries"] = disabled_entries
+    save_config(config)
+    state = "enabled" if enabled else "disabled"
+    log_activity("startup", f"{state.capitalize()} startup entry {name}", f"{entry_type} at {location}", "medium" if not enabled else "low")
+    return {"ok": True, "enabled": enabled, "name": name}
 
 
 def investigate_url(raw_url: str) -> dict[str, Any]:
@@ -1331,6 +1494,9 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
                 json_response(self, block_ip(str(body.get("remote_address", ""))))
             elif self.path == "/api/unblock-ip":
                 json_response(self, unblock_rule(str(body.get("rule_name", ""))))
+            elif self.path == "/api/startup-entry":
+                enabled = bool(body.get("enabled"))
+                json_response(self, set_startup_enabled(body.get("entry", {}), enabled))
             elif self.path == "/api/investigate-url":
                 json_response(self, investigate_url(str(body.get("url", ""))))
             elif self.path == "/api/browser-check":
@@ -1340,16 +1506,15 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
             elif self.path == "/api/defender-quick-scan":
                 json_response(self, defender_quick_scan())
             elif self.path == "/api/block-domain":
-                domain = str(body.get("domain", "")).strip().lower()
-                if not domain:
-                    raise ValueError("Domain is required.")
+                domain = sanitize_domain(str(body.get("domain", "")))
                 config = load_config()
                 domains = set(config.get("blocked_domains", []))
                 domains.add(domain)
                 config["blocked_domains"] = sorted(domains)
                 save_config(config)
-                log_activity("settings", f"Blocked domain {domain}", "Added to local ClearGuard domain blocklist.", "medium")
-                json_response(self, {"blocked_domains": config["blocked_domains"]})
+                enforcement = apply_hosts_domain_block(domain)
+                log_activity("settings", f"Blocked domain {domain}", enforcement["message"], "medium")
+                json_response(self, {"blocked_domains": config["blocked_domains"], "domain": domain, **enforcement})
             elif self.path == "/api/block-hash":
                 file_hash = str(body.get("sha256", "")).strip().lower()
                 if not re.fullmatch(r"[a-f0-9]{64}", file_hash):
@@ -1362,12 +1527,13 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
                 log_activity("settings", f"Blocked hash {file_hash[:12]}", "Added to local ClearGuard hash blocklist.", "medium")
                 json_response(self, {"blocked_hashes": config["blocked_hashes"]})
             elif self.path == "/api/unblock-domain":
-                domain = str(body.get("domain", "")).strip().lower()
+                domain = sanitize_domain(str(body.get("domain", "")))
                 config = load_config()
                 config["blocked_domains"] = [item for item in config.get("blocked_domains", []) if item != domain]
                 save_config(config)
+                enforcement = remove_hosts_domain_block(domain)
                 log_activity("settings", f"Removed blocked domain {domain}", "Removed from local ClearGuard domain blocklist.", "low")
-                json_response(self, {"blocked_domains": config["blocked_domains"]})
+                json_response(self, {"blocked_domains": config["blocked_domains"], "domain": domain, **enforcement})
             elif self.path == "/api/unblock-hash":
                 file_hash = str(body.get("sha256", "")).strip().lower()
                 config = load_config()

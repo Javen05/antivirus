@@ -12,6 +12,7 @@ const qs = (selector, root = document) => root.querySelector(selector);
 const qsa = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
 let currentStatus = null;
+const busyButtons = new WeakSet();
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -48,6 +49,46 @@ function empty(container, message) {
   container.append(item);
 }
 
+function setBusy(button, busy, label) {
+  if (!button) return;
+  if (busy) {
+    busyButtons.add(button);
+    button.dataset.idleText = button.textContent;
+    button.disabled = true;
+    button.classList.add("is-loading");
+    if (label) button.textContent = label;
+  } else {
+    busyButtons.delete(button);
+    button.disabled = false;
+    button.classList.remove("is-loading");
+    if (button.dataset.idleText) {
+      button.textContent = button.dataset.idleText;
+      delete button.dataset.idleText;
+    }
+  }
+}
+
+async function withBusy(button, label, work) {
+  if (busyButtons.has(button)) return;
+  setBusy(button, true, label);
+  try {
+    return await work();
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function sanitizeDomainInput(value) {
+  const trimmed = value.trim().replace(/^["'`]+|["'`]+$/g, "");
+  if (!trimmed) return "";
+  try {
+    const url = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
+    return url.hostname.replace(/^www\./i, "").replace(/\.$/, "").toLowerCase();
+  } catch {
+    return trimmed.replace(/^https?:\/\//i, "").split("/")[0].replace(/^www\./i, "").replace(/\.$/, "").toLowerCase();
+  }
+}
+
 function switchView(view) {
   qsa(".view").forEach((section) => section.classList.toggle("active", section.id === view));
   qsa(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
@@ -64,6 +105,8 @@ function switchView(view) {
 
 function setMode(mode) {
   qsa(".mode-button").forEach((button) => button.classList.toggle("active", button.dataset.mode === mode));
+  const labels = { quiet: "Low alerts", balanced: "Recommended", strict: "High alert" };
+  qs("#viewTitle").title = `Protection mode: ${labels[mode] || mode}`;
 }
 
 function renderStatus(status) {
@@ -218,6 +261,7 @@ function renderFindings(items) {
 }
 
 async function refreshTraffic() {
+  const refreshButton = qs("#refreshTraffic");
   const body = qs("#trafficTable");
   body.innerHTML = `<tr><td colspan="5">Reading live TCP connections...</td></tr>`;
   if (currentStatus) {
@@ -226,7 +270,7 @@ async function refreshTraffic() {
       : "ClearGuard is not running as Administrator. You can inspect traffic here, but creating Windows Firewall block rules requires elevation.";
   }
   try {
-    const rows = await api("/api/network");
+    const rows = await withBusy(refreshButton, "Refreshing", () => api("/api/network"));
     if (!rows.length) {
       body.innerHTML = `<tr><td colspan="5">No established outbound TCP connections found.</td></tr>`;
       return;
@@ -245,16 +289,16 @@ async function refreshTraffic() {
       tr.children[1].textContent = `${row.process} (PID ${row.pid})`;
       tr.children[2].innerHTML = `<strong></strong><br><small></small>`;
       tr.children[2].querySelector("strong").textContent = row.host || row.remote_address;
-      tr.children[2].querySelector("small").textContent = row.remote;
+      tr.children[2].querySelector("small").textContent = `${row.remote}${row.path ? ` - ${row.path}` : ""}`;
       tr.children[3].textContent = row.findings.join(" ");
       tr.querySelector("button").addEventListener("click", async () => {
         const ok = window.confirm(`Create a Windows Firewall block rule for ${row.remote_address}? This can break the app or website using that IP.`);
         if (!ok) return;
         try {
-          await api("/api/block-ip", {
+          await withBusy(tr.querySelector("button"), "Blocking", () => api("/api/block-ip", {
             method: "POST",
             body: JSON.stringify({ remote_address: row.remote_address })
-          });
+          }));
           await refreshStatus();
           await refreshBlocked();
         } catch (error) {
@@ -272,9 +316,9 @@ async function refreshTraffic() {
 async function refreshBlocked() {
   const list = qs("#blockedList");
   try {
-    const rows = await api("/api/blocked-ips");
+    const rows = await withBusy(qs("#refreshBlocked"), "Refreshing", () => api("/api/blocked-ips"));
     if (!rows.length) {
-      empty(list, "No enabled outbound Windows Firewall block rules with specific remote IPs were found.");
+      empty(list, "No ClearGuard/user-created outbound IP blocks found. Internal system and sandbox firewall rules are hidden.");
       return;
     }
     list.replaceChildren();
@@ -361,7 +405,7 @@ async function refreshStartup() {
   const list = qs("#startupList");
   empty(list, "Auditing registry Run keys, Startup folders, and scheduled tasks...");
   try {
-    const rows = await api("/api/startup-audit");
+    const rows = await withBusy(qs("#refreshStartup"), "Auditing", () => api("/api/startup-audit"));
     if (!rows.length) {
       empty(list, "No enabled startup entries found.");
       return;
@@ -376,10 +420,36 @@ async function refreshStartup() {
           <p></p>
           <small></small>
         </div>
+        <button class="secondary-action" type="button"></button>
       `;
       qs("h4", article).textContent = `${row.risk.toUpperCase()} - ${row.name}`;
       qs("p", article).textContent = row.findings.join(" ");
       qs("small", article).textContent = `${row.type} - ${row.location} - ${row.command}`;
+      const button = qs("button", article);
+      button.textContent = row.enabled ? "Disable startup" : "Enable startup";
+      if (row.can_toggle === false) {
+        button.textContent = "System task";
+        button.disabled = true;
+        button.title = "Protected Windows scheduled task; shown for visibility only.";
+        list.append(article);
+        return;
+      }
+      button.addEventListener("click", async () => {
+        const nextState = !row.enabled;
+        const action = nextState ? "enable" : "disable";
+        const ok = window.confirm(`${action[0].toUpperCase()}${action.slice(1)} startup for "${row.name}"?\n\nSome system-wide entries require Administrator rights.`);
+        if (!ok) return;
+        try {
+          await withBusy(button, nextState ? "Enabling" : "Disabling", () => api("/api/startup-entry", {
+            method: "POST",
+            body: JSON.stringify({ entry: row, enabled: nextState })
+          }));
+          await refreshStartup();
+          await refreshStatus();
+        } catch (error) {
+          window.alert(error.message);
+        }
+      });
       list.append(article);
     });
   } catch (error) {
@@ -390,13 +460,14 @@ async function refreshStartup() {
 async function refreshBlocklists() {
   const list = qs("#blocklistList");
   try {
-    const data = await api("/api/blocklists");
+    const [data, blockedIps] = await Promise.all([api("/api/blocklists"), api("/api/blocked-ips")]);
     const rows = [
       ...(data.blocked_domains || []).map((value) => ({ type: "Domain", value, endpoint: "/api/unblock-domain", key: "domain" })),
-      ...(data.blocked_hashes || []).map((value) => ({ type: "SHA-256", value, endpoint: "/api/unblock-hash", key: "sha256" }))
+      ...(data.blocked_hashes || []).map((value) => ({ type: "SHA-256", value, endpoint: "/api/unblock-hash", key: "sha256" })),
+      ...(blockedIps || []).map((item) => ({ type: "Outbound IP", value: item.remote_address, endpoint: "/api/unblock-ip", key: "rule_name", ruleName: item.name }))
     ];
     if (!rows.length) {
-      empty(list, "No local domains or hashes are blocked.");
+      empty(list, "No local domains, hashes, or ClearGuard IP blocks are active.");
       return;
     }
     list.replaceChildren();
@@ -413,10 +484,11 @@ async function refreshBlocklists() {
       `;
       qs("h4", article).textContent = row.value;
       qs("p", article).textContent = row.type;
-      qs("small", article).textContent = "Local ClearGuard blocklist";
+      qs("small", article).textContent = row.type === "Outbound IP" ? "Windows Firewall rule" : "Local ClearGuard blocklist";
       qs("button", article).addEventListener("click", async () => {
-        await api(row.endpoint, { method: "POST", body: JSON.stringify({ [row.key]: row.value }) });
+        await withBusy(qs("button", article), "Removing", () => api(row.endpoint, { method: "POST", body: JSON.stringify({ [row.key]: row.ruleName || row.value }) }));
         await refreshBlocklists();
+        await refreshBlocked();
       });
       list.append(article);
     });
@@ -439,10 +511,10 @@ async function checkUrl() {
   const url = qs("#urlInput").value.trim();
   box.textContent = "Checking URL locally...";
   try {
-    const result = await api("/api/investigate-url", {
+    const result = await withBusy(qs("#checkUrl"), "Checking", () => api("/api/investigate-url", {
       method: "POST",
       body: JSON.stringify({ url })
-    });
+    }));
     box.innerHTML = `
       <strong>${result.risk.toUpperCase()} - ${result.host}</strong><br>
       Addresses: ${result.addresses.join(", ") || "none"}<br>
@@ -466,7 +538,8 @@ async function defenderAction(endpoint, label) {
   const box = qs("#urlResult");
   box.textContent = `${label}...`;
   try {
-    const result = await api(endpoint, { method: "POST", body: JSON.stringify({}) });
+    const button = endpoint.includes("update") ? qs("#updateDefender") : qs("#quickScan");
+    const result = await withBusy(button, "Working", () => api(endpoint, { method: "POST", body: JSON.stringify({}) }));
     box.textContent = `${label} finished. ${result.detection_count ?? 0} detection(s).`;
     await refreshStatus();
   } catch (error) {
@@ -475,22 +548,26 @@ async function defenderAction(endpoint, label) {
 }
 
 async function addBlocklistItem(endpoint, payload, input) {
-  await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
+  const result = await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
   input.value = "";
   await refreshBlocklists();
+  await refreshBlocked();
   await refreshStatus();
+  return result;
 }
 
 qsa(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
 qsa(".mode-button").forEach((button) => {
   button.addEventListener("click", async () => {
-    await api("/api/settings", { method: "POST", body: JSON.stringify({ mode: button.dataset.mode }) });
-    await refreshStatus();
+    await withBusy(button, "Saving", async () => {
+      await api("/api/settings", { method: "POST", body: JSON.stringify({ mode: button.dataset.mode }) });
+      await refreshStatus();
+    });
   });
 });
-qs("#refreshOverview").addEventListener("click", refreshStatus);
-qs("#scanDefault").addEventListener("click", () => runScan(""));
-qs("#scanPathButton").addEventListener("click", () => runScan(qs("#scanPath").value.trim()));
+qs("#refreshOverview").addEventListener("click", (event) => withBusy(event.currentTarget, "Refreshing", refreshStatus));
+qs("#scanDefault").addEventListener("click", (event) => withBusy(event.currentTarget, "Scanning", () => runScan("")));
+qs("#scanPathButton").addEventListener("click", (event) => withBusy(event.currentTarget, "Scanning", () => runScan(qs("#scanPath").value.trim())));
 qs("#refreshTraffic").addEventListener("click", refreshTraffic);
 qs("#refreshBlocked").addEventListener("click", refreshBlocked);
 qs("#refreshQuarantine").addEventListener("click", refreshQuarantine);
@@ -501,7 +578,7 @@ qs("#realtimeToggle").addEventListener("change", (event) => updateSetting("realt
 qs("#notificationsToggle").addEventListener("change", (event) => updateSetting("notifications_enabled", event.target.checked));
 qs("#testNotification").addEventListener("click", async () => {
   try {
-    await api("/api/test-notification", { method: "POST", body: JSON.stringify({}) });
+    await withBusy(qs("#testNotification"), "Sending", () => api("/api/test-notification", { method: "POST", body: JSON.stringify({}) }));
   } catch (error) {
     window.alert(error.message);
   }
@@ -510,11 +587,37 @@ qs("#updateDefender").addEventListener("click", () => defenderAction("/api/defen
 qs("#quickScan").addEventListener("click", () => defenderAction("/api/defender-quick-scan", "Running Defender quick scan"));
 qs("#addDomain").addEventListener("click", () => {
   const input = qs("#domainInput");
-  addBlocklistItem("/api/block-domain", { domain: input.value.trim() }, input);
+  input.value = sanitizeDomainInput(input.value);
+  withBusy(qs("#addDomain"), "Blocking", async () => {
+    try {
+      const result = await addBlocklistItem("/api/block-domain", { domain: input.value }, input);
+      qs("#rulesHelp").textContent = result.message || `Blocked ${result.domain}.`;
+    } catch (error) {
+      qs("#rulesHelp").textContent = error.message;
+    }
+  });
+});
+qs("#addIp").addEventListener("click", () => {
+  const input = qs("#ipInput");
+  withBusy(qs("#addIp"), "Blocking", async () => {
+    try {
+      const result = await addBlocklistItem("/api/block-ip", { remote_address: input.value.trim() }, input);
+      qs("#rulesHelp").textContent = `Created Windows Firewall rule: ${result.rule}`;
+    } catch (error) {
+      qs("#rulesHelp").textContent = error.message;
+    }
+  });
 });
 qs("#addHash").addEventListener("click", () => {
   const input = qs("#hashInput");
-  addBlocklistItem("/api/block-hash", { sha256: input.value.trim() }, input);
+  withBusy(qs("#addHash"), "Blocking", async () => {
+    try {
+      await addBlocklistItem("/api/block-hash", { sha256: input.value.trim() }, input);
+      qs("#rulesHelp").textContent = "SHA-256 hash added to local file blocklist.";
+    } catch (error) {
+      qs("#rulesHelp").textContent = error.message;
+    }
+  });
 });
 
 refreshStatus();

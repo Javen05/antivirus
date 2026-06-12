@@ -41,9 +41,9 @@
             <h2 id="viewTitle">Overview</h2>
           </div>
           <div class="mode-control" aria-label="Protection mode">
-            <button class="mode-button" data-mode="quiet" type="button">Quiet</button>
-            <button class="mode-button" data-mode="balanced" type="button">Balanced</button>
-            <button class="mode-button" data-mode="strict" type="button">Strict</button>
+            <button class="mode-button" data-mode="quiet" type="button" title="Fewer alerts; still scans and logs.">Low alerts</button>
+            <button class="mode-button" data-mode="balanced" type="button" title="Recommended alert level for daily use.">Recommended</button>
+            <button class="mode-button" data-mode="strict" type="button" title="More warnings for suspicious behavior.">High alert</button>
           </div>
         </header>
 
@@ -116,7 +116,7 @@
               <h3>Check a suspicious site</h3>
               <p>Resolve and inspect a URL for local red flags without attacking the site or sending credentials.</p>
               <div class="input-row">
-                <input id="urlInput" type="url" placeholder="https://example.com">
+                <input id="urlInput" type="url" aria-label="Suspicious URL to check">
                 <button class="primary-action" id="checkUrl" type="button">Check</button>
               </div>
               <div class="result-box" id="urlResult"></div>
@@ -134,7 +134,7 @@
               <button class="secondary-action" id="scanDefault" type="button">Scan default folder</button>
             </div>
             <div class="input-row wide">
-              <input id="scanPath" type="text" placeholder="C:\Users\you\Downloads">
+              <input id="scanPath" type="text" aria-label="File or folder path to scan">
               <button class="primary-action" id="scanPathButton" type="button">Scan path</button>
             </div>
             <div class="result-box" id="scanSummary"></div>
@@ -169,7 +169,7 @@
             <div class="section-head subhead">
               <div>
                 <p class="eyebrow">Windows Firewall</p>
-                <h3>Existing outbound IP blocks</h3>
+                <h3>ClearGuard outbound IP blocks</h3>
               </div>
               <button class="secondary-action" id="refreshBlocked" type="button">Refresh blocked IPs</button>
             </div>
@@ -215,15 +215,20 @@
             <div class="section-head subhead">
               <div>
                 <p class="eyebrow">Local blocklists</p>
-                <h3>Known-bad domains and hashes</h3>
+                <h3>Domains, IPs, and file hashes</h3>
               </div>
             </div>
+            <div class="result-box" id="rulesHelp">Domain blocks are enforced in ClearGuard checks and the browser extension. Run ClearGuard as Administrator to also write Windows hosts-file blocks.</div>
             <div class="input-row wide">
-              <input id="domainInput" type="text" placeholder="malicious.example">
+              <input id="domainInput" type="text" aria-label="Domain or URL to block">
               <button class="primary-action" id="addDomain" type="button">Block domain</button>
             </div>
             <div class="input-row wide">
-              <input id="hashInput" type="text" placeholder="SHA-256 hash">
+              <input id="ipInput" type="text" aria-label="IP address to block">
+              <button class="primary-action" id="addIp" type="button">Block IP</button>
+            </div>
+            <div class="input-row wide">
+              <input id="hashInput" type="text" aria-label="SHA-256 hash to block">
               <button class="primary-action" id="addHash" type="button">Block hash</button>
             </div>
             <div class="rules-list" id="blocklistList"></div>
