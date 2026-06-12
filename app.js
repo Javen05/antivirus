@@ -13,6 +13,10 @@ const qsa = (selector, root = document) => Array.from(root.querySelectorAll(sele
 
 let currentStatus = null;
 const busyButtons = new WeakSet();
+let scanResults = [];
+let trafficRows = [];
+let quarantineItems = [];
+let startupRows = [];
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -89,6 +93,38 @@ function sanitizeDomainInput(value) {
   }
 }
 
+function textMatches(value, query) {
+  return !query || String(value || "").toLowerCase().includes(query.toLowerCase());
+}
+
+function renderMetrics(container, items) {
+  container.replaceChildren();
+  items.forEach((item) => {
+    const metric = document.createElement("div");
+    metric.className = "metric-chip";
+    metric.innerHTML = `<strong></strong><span></span>`;
+    qs("strong", metric).textContent = item.value;
+    qs("span", metric).textContent = item.label;
+    container.append(metric);
+  });
+}
+
+function downloadJson(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function countBy(items, key, value) {
+  return items.filter((item) => item[key] === value).length;
+}
+
 function switchView(view) {
   qsa(".view").forEach((section) => section.classList.toggle("active", section.id === view));
   qsa(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
@@ -113,6 +149,7 @@ function renderStatus(status) {
   currentStatus = status;
   qs("#trustScore").textContent = status.trust_score;
   qs("#trustCopy").textContent = trustCopy(status);
+  qs("#overviewSummary").textContent = overviewSummary(status);
   setMode(status.mode);
 
   const lastScan = status.last_scan;
@@ -136,13 +173,48 @@ function renderStatus(status) {
   qs("#defenderToggle").checked = Boolean(status.defender_enabled);
   qs("#realtimeToggle").checked = Boolean(status.realtime_enabled);
   qs("#notificationsToggle").checked = Boolean(status.notifications_enabled);
+  renderActionList(status);
+  renderProtectedPaths(status.protected_paths || []);
   renderActivity(status.activity || []);
+}
+
+function overviewSummary(status) {
+  const admin = status.is_admin ? "Admin controls ready" : "Inspection mode; firewall and hosts enforcement need Administrator.";
+  const persistence = status.persistence_installed ? "Starts at login" : "Startup persistence is not installed.";
+  return `${admin} ${persistence} ${status.network_count} live connection(s), ${status.quarantine_count} contained file(s).`;
 }
 
 function trustCopy(status) {
   if (status.trust_score >= 85) return "Healthy. No urgent local signal is currently dominating risk.";
   if (status.trust_score >= 75) return "Worth reviewing. One or more local signals need attention.";
   return "High attention. Review scan findings, traffic, and quarantine.";
+}
+
+function renderActionList(status) {
+  const list = qs("#actionList");
+  list.replaceChildren();
+  const actions = [];
+  if (!status.persistence_installed) actions.push({ title: "Install startup persistence", detail: "Run scripts/install-clearguard.ps1 as Administrator so ClearGuard starts after reboot.", view: "learn" });
+  if (!status.is_admin) actions.push({ title: "Restart as Administrator", detail: "Required for Windows Firewall IP blocks and hosts-file domain enforcement.", view: "rules" });
+  if (!status.last_scan) actions.push({ title: "Run your first scan", detail: "Scan Downloads or another folder you are worried about.", view: "scanner" });
+  if (status.high_network_count) actions.push({ title: "Review high-risk traffic", detail: `${status.high_network_count} live connection(s) are from commonly abused process names.`, view: "traffic" });
+  if (status.quarantine_count) actions.push({ title: "Review quarantine", detail: `${status.quarantine_count} file(s) are contained and waiting for restore/delete decisions.`, view: "quarantine" });
+  if (!actions.length) actions.push({ title: "Keep monitoring", detail: "No urgent action is dominating the local signal right now.", view: "overview" });
+  actions.slice(0, 4).forEach((item) => {
+    const article = document.createElement("article");
+    article.className = "action-item";
+    article.innerHTML = `
+      <div>
+        <h4></h4>
+        <p></p>
+      </div>
+      <button class="secondary-action" type="button">Open</button>
+    `;
+    qs("h4", article).textContent = item.title;
+    qs("p", article).textContent = item.detail;
+    qs("button", article).addEventListener("click", () => switchView(item.view));
+    list.append(article);
+  });
 }
 
 function renderActivity(events) {
@@ -194,6 +266,43 @@ function renderRules(rules) {
   });
 }
 
+function renderProtectedPaths(paths) {
+  const list = qs("#protectedPathList");
+  if (!list) return;
+  renderMetrics(qs("#scanMetrics"), [
+    { value: paths.length, label: "protected path(s)" },
+    { value: currentStatus?.realtime_enabled ? "On" : "Off", label: "realtime monitor" },
+    { value: currentStatus?.defender_enabled ? "On" : "Off", label: "Defender engine" }
+  ]);
+  if (!paths.length) {
+    empty(list, "No protected paths are configured.");
+    return;
+  }
+  list.replaceChildren();
+  paths.forEach((path) => {
+    const article = document.createElement("article");
+    article.className = "rule-item";
+    article.innerHTML = `
+      <div>
+        <h4></h4>
+        <p></p>
+      </div>
+      <div class="quarantine-actions">
+        <button class="secondary-action scan-path-action" type="button">Scan</button>
+        <button class="secondary-action remove-path-action" type="button">Remove</button>
+      </div>
+    `;
+    qs("h4", article).textContent = path;
+    qs("p", article).textContent = "Realtime folder monitoring watches this path while the local agent is running.";
+    qs(".scan-path-action", article).addEventListener("click", (event) => withBusy(event.currentTarget, "Scanning", () => runScan(path)));
+    qs(".remove-path-action", article).addEventListener("click", (event) => withBusy(event.currentTarget, "Removing", async () => {
+      await api("/api/protected-paths", { method: "POST", body: JSON.stringify({ action: "remove", path }) });
+      await refreshStatus();
+    }));
+    list.append(article);
+  });
+}
+
 async function refreshStatus() {
   try {
     renderStatus(await api("/api/status"));
@@ -214,6 +323,7 @@ async function runScan(path) {
       body: JSON.stringify({ path })
     });
     const risky = result.risky.length;
+    scanResults = result.risky || [];
     summary.innerHTML = `
       <strong>${result.file_count} file(s) scanned</strong><br>
       ${risky} item(s) need review. Completed in ${result.duration_seconds}s.<br>
@@ -223,7 +333,7 @@ async function runScan(path) {
     if (!risky) {
       empty(findings, "No risky files found by local rules.");
     } else {
-      renderFindings(result.risky);
+      renderFindings();
     }
     await refreshStatus();
   } catch (error) {
@@ -231,10 +341,21 @@ async function runScan(path) {
   }
 }
 
-function renderFindings(items) {
+function renderFindings(items = scanResults) {
   const list = qs("#scanFindings");
+  const query = qs("#scanFindingSearch")?.value || "";
+  const risk = qs("#scanRiskFilter")?.value || "all";
+  const visible = items.filter((item) => {
+    const matchesRisk = risk === "all" || item.risk === risk;
+    const haystack = `${item.name} ${item.path} ${(item.findings || []).join(" ")} ${(item.sources || []).join(" ")}`;
+    return matchesRisk && textMatches(haystack, query);
+  });
+  if (!visible.length) {
+    empty(list, items.length ? "No scan findings match this filter." : "No risky files found by local rules.");
+    return;
+  }
   list.replaceChildren();
-  items.forEach((item) => {
+  visible.forEach((item) => {
     const article = document.createElement("article");
     article.className = `finding-item ${riskClass(item.risk)}`;
     article.innerHTML = `
@@ -271,46 +392,71 @@ async function refreshTraffic() {
   }
   try {
     const rows = await withBusy(refreshButton, "Refreshing", () => api("/api/network"));
-    if (!rows.length) {
-      body.innerHTML = `<tr><td colspan="5">No established outbound TCP connections found.</td></tr>`;
-      return;
-    }
-    body.replaceChildren();
-    rows.forEach((row) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td><span class="risk-pill ${riskClass(row.risk)}"></span></td>
-        <td></td>
-        <td></td>
-        <td></td>
-        <td><button class="secondary-action" type="button">Block IP</button></td>
-      `;
-      tr.children[0].querySelector("span").textContent = row.risk;
-      tr.children[1].textContent = `${row.process} (PID ${row.pid})`;
-      tr.children[2].innerHTML = `<strong></strong><br><small></small>`;
-      tr.children[2].querySelector("strong").textContent = row.host || row.remote_address;
-      tr.children[2].querySelector("small").textContent = `${row.remote}${row.path ? ` - ${row.path}` : ""}`;
-      tr.children[3].textContent = row.findings.join(" ");
-      tr.querySelector("button").addEventListener("click", async () => {
-        const ok = window.confirm(`Create a Windows Firewall block rule for ${row.remote_address}? This can break the app or website using that IP.`);
-        if (!ok) return;
-        try {
-          await withBusy(tr.querySelector("button"), "Blocking", () => api("/api/block-ip", {
-            method: "POST",
-            body: JSON.stringify({ remote_address: row.remote_address })
-          }));
-          await refreshStatus();
-          await refreshBlocked();
-        } catch (error) {
-          window.alert(error.message);
-        }
-      });
-      body.append(tr);
-    });
+    trafficRows = rows || [];
+    renderTrafficRows();
     await refreshBlocked();
   } catch (error) {
     body.innerHTML = `<tr><td colspan="5">${error.message}</td></tr>`;
   }
+}
+
+function renderTrafficRows() {
+  const body = qs("#trafficTable");
+  renderMetrics(qs("#trafficMetrics"), [
+    { value: trafficRows.length, label: "live connections" },
+    { value: countBy(trafficRows, "risk", "high"), label: "high risk" },
+    { value: countBy(trafficRows, "risk", "medium"), label: "medium risk" },
+    { value: new Set(trafficRows.map((row) => row.process)).size, label: "processes" }
+  ]);
+  if (!trafficRows.length) {
+    body.innerHTML = `<tr><td colspan="5">No established outbound TCP connections found.</td></tr>`;
+    return;
+  }
+  const query = qs("#trafficSearch")?.value || "";
+  const risk = qs("#trafficRiskFilter")?.value || "all";
+  const visible = trafficRows.filter((row) => {
+    const matchesRisk = risk === "all" || row.risk === risk;
+    const haystack = `${row.process} ${row.pid} ${row.remote} ${row.remote_address} ${row.host || ""} ${row.path || ""} ${row.service_hint || ""} ${(row.findings || []).join(" ")}`;
+    return matchesRisk && textMatches(haystack, query);
+  });
+  if (!visible.length) {
+    body.innerHTML = `<tr><td colspan="5">No live connections match this filter.</td></tr>`;
+    return;
+  }
+  body.replaceChildren();
+  visible.forEach((row) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><span class="risk-pill ${riskClass(row.risk)}"></span></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td><button class="secondary-action" type="button">Block IP</button></td>
+    `;
+    tr.children[0].querySelector("span").textContent = row.risk;
+    tr.children[1].innerHTML = `<strong></strong><br><small></small>`;
+    tr.children[1].querySelector("strong").textContent = `${row.process} (PID ${row.pid})`;
+    tr.children[1].querySelector("small").textContent = row.path || "Process path unavailable";
+    tr.children[2].innerHTML = `<strong></strong><br><small></small>`;
+    tr.children[2].querySelector("strong").textContent = row.host || row.remote_address;
+    tr.children[2].querySelector("small").textContent = row.remote;
+    tr.children[3].textContent = row.findings.join(" ");
+    tr.querySelector("button").addEventListener("click", async () => {
+      const ok = window.confirm(`Create a Windows Firewall block rule for ${row.remote_address}? This can break the app or website using that IP.`);
+      if (!ok) return;
+      try {
+        await withBusy(tr.querySelector("button"), "Blocking", () => api("/api/block-ip", {
+          method: "POST",
+          body: JSON.stringify({ remote_address: row.remote_address })
+        }));
+        await refreshStatus();
+        await refreshBlocked();
+      } catch (error) {
+        window.alert(error.message);
+      }
+    });
+    body.append(tr);
+  });
 }
 
 async function refreshBlocked() {
@@ -361,44 +507,71 @@ async function refreshQuarantine() {
   const list = qs("#quarantineList");
   try {
     const items = await api("/api/quarantine");
-    if (!items.length) {
-      empty(list, "No files are in quarantine.");
-      return;
-    }
-    list.replaceChildren();
-    items.forEach((item) => {
-      const article = document.createElement("article");
-      article.className = "quarantine-item";
-      article.innerHTML = `
-        <div>
-          <h4></h4>
-          <p></p>
-          <small></small>
-        </div>
-        <div class="quarantine-actions"></div>
-      `;
-      qs("h4", article).textContent = `${item.name} - ${item.status}`;
-      qs("p", article).textContent = item.reason;
-      qs("small", article).textContent = `${item.original_path} - ${formatTime(item.created_at)}`;
-      const actions = qs(".quarantine-actions", article);
-      if (item.status === "contained") {
-        const restore = document.createElement("button");
-        restore.className = "secondary-action";
-        restore.type = "button";
-        restore.textContent = "Restore";
-        restore.addEventListener("click", () => quarantineAction(item.id, "restore"));
-        const del = document.createElement("button");
-        del.className = "primary-action danger";
-        del.type = "button";
-        del.textContent = "Delete";
-        del.addEventListener("click", () => quarantineAction(item.id, "delete"));
-        actions.append(restore, del);
-      }
-      list.append(article);
-    });
+    quarantineItems = items || [];
+    renderQuarantineItems();
   } catch (error) {
     empty(list, error.message);
   }
+}
+
+function renderQuarantineItems() {
+  const list = qs("#quarantineList");
+  renderMetrics(qs("#quarantineMetrics"), [
+    { value: quarantineItems.length, label: "total records" },
+    { value: countBy(quarantineItems, "status", "contained"), label: "contained" },
+    { value: countBy(quarantineItems, "status", "restored"), label: "restored" },
+    { value: countBy(quarantineItems, "status", "deleted"), label: "deleted" }
+  ]);
+  if (!quarantineItems.length) {
+    empty(list, "No files are in quarantine.");
+    return;
+  }
+  const query = qs("#quarantineSearch")?.value || "";
+  const status = qs("#quarantineStatusFilter")?.value || "all";
+  const visible = quarantineItems.filter((item) => {
+    const matchesStatus = status === "all" || item.status === status;
+    const haystack = `${item.name} ${item.status} ${item.reason} ${item.original_path} ${item.sha256 || ""}`;
+    return matchesStatus && textMatches(haystack, query);
+  });
+  if (!visible.length) {
+    empty(list, "No quarantine records match this filter.");
+    return;
+  }
+  list.replaceChildren();
+  visible.forEach((item) => {
+    const article = document.createElement("article");
+    article.className = "quarantine-item";
+    article.innerHTML = `
+      <div>
+        <h4></h4>
+        <p></p>
+        <small></small>
+      </div>
+      <div class="quarantine-actions"></div>
+    `;
+    qs("h4", article).textContent = `${item.name} - ${item.status}`;
+    qs("p", article).textContent = item.reason;
+    qs("small", article).textContent = `${item.original_path} - ${formatTime(item.created_at)} - ${item.sha256 || "hash unavailable"}`;
+    const actions = qs(".quarantine-actions", article);
+    if (item.status === "contained") {
+      const restore = document.createElement("button");
+      restore.className = "secondary-action";
+      restore.type = "button";
+      restore.textContent = "Restore";
+      restore.addEventListener("click", (event) => withBusy(event.currentTarget, "Restoring", () => quarantineAction(item.id, "restore")));
+      const del = document.createElement("button");
+      del.className = "primary-action danger";
+      del.type = "button";
+      del.textContent = "Delete";
+      del.addEventListener("click", async (event) => {
+        const ok = window.confirm(`Permanently delete ${item.name} from quarantine?`);
+        if (!ok) return;
+        await withBusy(event.currentTarget, "Deleting", () => quarantineAction(item.id, "delete"));
+      });
+      actions.append(restore, del);
+    }
+    list.append(article);
+  });
 }
 
 async function refreshStartup() {
@@ -406,55 +579,84 @@ async function refreshStartup() {
   empty(list, "Auditing registry Run keys, Startup folders, and scheduled tasks...");
   try {
     const rows = await withBusy(qs("#refreshStartup"), "Auditing", () => api("/api/startup-audit"));
-    if (!rows.length) {
-      empty(list, "No enabled startup entries found.");
-      return;
-    }
-    list.replaceChildren();
-    rows.forEach((row) => {
-      const article = document.createElement("article");
-      article.className = `finding-item ${riskClass(row.risk)}`;
-      article.innerHTML = `
-        <div>
-          <h4></h4>
-          <p></p>
-          <small></small>
-        </div>
-        <button class="secondary-action" type="button"></button>
-      `;
-      qs("h4", article).textContent = `${row.risk.toUpperCase()} - ${row.name}`;
-      qs("p", article).textContent = row.findings.join(" ");
-      qs("small", article).textContent = `${row.type} - ${row.location} - ${row.command}`;
-      const button = qs("button", article);
-      button.textContent = row.enabled ? "Disable startup" : "Enable startup";
-      if (row.can_toggle === false) {
-        button.textContent = "System task";
-        button.disabled = true;
-        button.title = "Protected Windows scheduled task; shown for visibility only.";
-        list.append(article);
-        return;
-      }
-      button.addEventListener("click", async () => {
-        const nextState = !row.enabled;
-        const action = nextState ? "enable" : "disable";
-        const ok = window.confirm(`${action[0].toUpperCase()}${action.slice(1)} startup for "${row.name}"?\n\nSome system-wide entries require Administrator rights.`);
-        if (!ok) return;
-        try {
-          await withBusy(button, nextState ? "Enabling" : "Disabling", () => api("/api/startup-entry", {
-            method: "POST",
-            body: JSON.stringify({ entry: row, enabled: nextState })
-          }));
-          await refreshStartup();
-          await refreshStatus();
-        } catch (error) {
-          window.alert(error.message);
-        }
-      });
-      list.append(article);
-    });
+    startupRows = rows || [];
+    renderStartupRows();
   } catch (error) {
     empty(list, error.message);
   }
+}
+
+function renderStartupRows() {
+  const list = qs("#startupList");
+  renderMetrics(qs("#startupMetrics"), [
+    { value: startupRows.length, label: "startup entries" },
+    { value: startupRows.filter((row) => row.can_toggle !== false).length, label: "controllable" },
+    { value: startupRows.filter((row) => row.can_toggle === false).length, label: "system protected" },
+    { value: startupRows.filter((row) => !row.enabled).length, label: "disabled" }
+  ]);
+  if (!startupRows.length) {
+    empty(list, "No startup entries found.");
+    return;
+  }
+  const query = qs("#startupSearch")?.value || "";
+  const filter = qs("#startupFilter")?.value || "all";
+  const visible = startupRows.filter((row) => {
+    const haystack = `${row.name} ${row.type} ${row.location} ${row.command} ${(row.findings || []).join(" ")}`;
+    const matchesText = textMatches(haystack, query);
+    const matchesFilter =
+      filter === "all" ||
+      (filter === "toggleable" && row.can_toggle !== false) ||
+      (filter === "system" && row.can_toggle === false) ||
+      (filter === "disabled" && !row.enabled) ||
+      row.risk === filter;
+    return matchesText && matchesFilter;
+  });
+  if (!visible.length) {
+    empty(list, "No startup entries match this filter.");
+    return;
+  }
+  list.replaceChildren();
+  visible.forEach((row) => {
+    const article = document.createElement("article");
+    article.className = `finding-item ${riskClass(row.risk)}`;
+    article.innerHTML = `
+      <div>
+        <h4></h4>
+        <p></p>
+        <small></small>
+      </div>
+      <button class="secondary-action" type="button"></button>
+    `;
+    qs("h4", article).textContent = `${row.risk.toUpperCase()} - ${row.name}`;
+    qs("p", article).textContent = row.findings.join(" ");
+    qs("small", article).textContent = `${row.type} - ${row.location} - ${row.command || "No command text"}`;
+    const button = qs("button", article);
+    button.textContent = row.enabled ? "Disable startup" : "Enable startup";
+    if (row.can_toggle === false) {
+      button.textContent = "System task";
+      button.disabled = true;
+      button.title = "Protected Windows scheduled task; shown for visibility only.";
+      list.append(article);
+      return;
+    }
+    button.addEventListener("click", async () => {
+      const nextState = !row.enabled;
+      const action = nextState ? "enable" : "disable";
+      const ok = window.confirm(`${action[0].toUpperCase()}${action.slice(1)} startup for "${row.name}"?\n\nSome system-wide entries require Administrator rights.`);
+      if (!ok) return;
+      try {
+        await withBusy(button, nextState ? "Enabling" : "Disabling", () => api("/api/startup-entry", {
+          method: "POST",
+          body: JSON.stringify({ entry: row, enabled: nextState })
+        }));
+        await refreshStartup();
+        await refreshStatus();
+      } catch (error) {
+        window.alert(error.message);
+      }
+    });
+    list.append(article);
+  });
 }
 
 async function refreshBlocklists() {
@@ -556,6 +758,72 @@ async function addBlocklistItem(endpoint, payload, input) {
   return result;
 }
 
+async function exportSecurityReport(button) {
+  await withBusy(button, "Exporting", async () => {
+    const report = await api("/api/report");
+    downloadJson(`clearguard-report-${new Date().toISOString().slice(0, 10)}.json`, report);
+  });
+}
+
+async function exportBlocklists(button) {
+  await withBusy(button, "Exporting", async () => {
+    const [blocklists, ips] = await Promise.all([api("/api/blocklists"), api("/api/blocked-ips")]);
+    downloadJson(`clearguard-blocklists-${new Date().toISOString().slice(0, 10)}.json`, { ...blocklists, blocked_ips: ips });
+  });
+}
+
+async function addProtectedPath(button) {
+  const input = qs("#protectedPathInput");
+  await withBusy(button, "Adding", async () => {
+    await api("/api/protected-paths", { method: "POST", body: JSON.stringify({ action: "add", path: input.value.trim() }) });
+    input.value = "";
+    await refreshStatus();
+  });
+}
+
+async function resetProtectedPaths(button) {
+  const ok = window.confirm("Reset protected paths to Downloads, Desktop, and Documents if those folders exist?");
+  if (!ok) return;
+  await withBusy(button, "Resetting", async () => {
+    await api("/api/protected-paths", { method: "POST", body: JSON.stringify({ action: "reset" }) });
+    await refreshStatus();
+  });
+}
+
+async function clearActivity(button) {
+  const ok = window.confirm("Clear the local activity log? This does not change quarantine or rules.");
+  if (!ok) return;
+  await withBusy(button, "Clearing", async () => {
+    await api("/api/activity-clear", { method: "POST", body: JSON.stringify({}) });
+    await refreshStatus();
+  });
+}
+
+async function purgeQuarantineHistory(button) {
+  const ok = window.confirm("Remove restored/deleted quarantine history records? Contained files will stay in quarantine.");
+  if (!ok) return;
+  await withBusy(button, "Cleaning", async () => {
+    await api("/api/quarantine-maintenance", { method: "POST", body: JSON.stringify({ action: "purge_inactive" }) });
+    await refreshQuarantine();
+    await refreshStatus();
+  });
+}
+
+async function importBlocklists(button) {
+  const input = qs("#bulkBlocklistInput");
+  await withBusy(button, "Importing", async () => {
+    try {
+      const result = await api("/api/blocklist-import", { method: "POST", body: JSON.stringify({ text: input.value }) });
+      input.value = "";
+      qs("#rulesHelp").textContent = `Imported ${result.imported_domains.length} domain(s), ${result.imported_hashes.length} hash(es), and ${result.imported_ips.length} IP block(s). ${result.skipped.length} skipped.`;
+      await refreshBlocklists();
+      await refreshStatus();
+    } catch (error) {
+      qs("#rulesHelp").textContent = error.message;
+    }
+  });
+}
+
 qsa(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
 qsa(".mode-button").forEach((button) => {
   button.addEventListener("click", async () => {
@@ -566,12 +834,26 @@ qsa(".mode-button").forEach((button) => {
   });
 });
 qs("#refreshOverview").addEventListener("click", (event) => withBusy(event.currentTarget, "Refreshing", refreshStatus));
+qs("#overviewScan").addEventListener("click", () => switchView("scanner"));
+qs("#exportReport").addEventListener("click", (event) => exportSecurityReport(event.currentTarget));
+qs("#clearActivity").addEventListener("click", (event) => clearActivity(event.currentTarget));
 qs("#scanDefault").addEventListener("click", (event) => withBusy(event.currentTarget, "Scanning", () => runScan("")));
 qs("#scanPathButton").addEventListener("click", (event) => withBusy(event.currentTarget, "Scanning", () => runScan(qs("#scanPath").value.trim())));
+qs("#addProtectedPath").addEventListener("click", (event) => addProtectedPath(event.currentTarget));
+qs("#resetProtectedPaths").addEventListener("click", (event) => resetProtectedPaths(event.currentTarget));
+qs("#scanFindingSearch").addEventListener("input", () => renderFindings());
+qs("#scanRiskFilter").addEventListener("change", () => renderFindings());
 qs("#refreshTraffic").addEventListener("click", refreshTraffic);
 qs("#refreshBlocked").addEventListener("click", refreshBlocked);
+qs("#trafficSearch").addEventListener("input", renderTrafficRows);
+qs("#trafficRiskFilter").addEventListener("change", renderTrafficRows);
 qs("#refreshQuarantine").addEventListener("click", refreshQuarantine);
+qs("#purgeQuarantineHistory").addEventListener("click", (event) => purgeQuarantineHistory(event.currentTarget));
+qs("#quarantineSearch").addEventListener("input", renderQuarantineItems);
+qs("#quarantineStatusFilter").addEventListener("change", renderQuarantineItems);
 qs("#refreshStartup").addEventListener("click", refreshStartup);
+qs("#startupSearch").addEventListener("input", renderStartupRows);
+qs("#startupFilter").addEventListener("change", renderStartupRows);
 qs("#checkUrl").addEventListener("click", checkUrl);
 qs("#defenderToggle").addEventListener("change", (event) => updateSetting("defender_enabled", event.target.checked));
 qs("#realtimeToggle").addEventListener("change", (event) => updateSetting("realtime_enabled", event.target.checked));
@@ -585,6 +867,9 @@ qs("#testNotification").addEventListener("click", async () => {
 });
 qs("#updateDefender").addEventListener("click", () => defenderAction("/api/defender-update", "Updating Defender definitions"));
 qs("#quickScan").addEventListener("click", () => defenderAction("/api/defender-quick-scan", "Running Defender quick scan"));
+qs("#downloadReportFromRules").addEventListener("click", (event) => exportSecurityReport(event.currentTarget));
+qs("#exportBlocklists").addEventListener("click", (event) => exportBlocklists(event.currentTarget));
+qs("#importBlocklists").addEventListener("click", (event) => importBlocklists(event.currentTarget));
 qs("#addDomain").addEventListener("click", () => {
   const input = qs("#domainInput");
   input.value = sanitizeDomainInput(input.value);

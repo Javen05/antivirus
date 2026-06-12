@@ -48,6 +48,19 @@
         </header>
 
         <section class="view active" id="overview" aria-labelledby="viewTitle">
+          <section class="hero-panel">
+            <div>
+              <p class="eyebrow">Command center</p>
+              <h3>Protection that explains itself</h3>
+              <p id="overviewSummary">Reading local security state...</p>
+            </div>
+            <div class="hero-actions">
+              <button class="primary-action" id="overviewScan" type="button">Scan now</button>
+              <button class="secondary-action" id="exportReport" type="button">Export report</button>
+              <button class="secondary-action" id="clearActivity" type="button">Clear activity</button>
+            </div>
+          </section>
+
           <div class="status-grid">
             <article class="status-tile">
               <div class="tile-icon" aria-hidden="true">F</div>
@@ -89,6 +102,14 @@
           <section class="panel split-panel">
             <div>
               <div class="section-head">
+                <div>
+                  <p class="eyebrow">Recommended actions</p>
+                  <h3>Next best moves</h3>
+                </div>
+              </div>
+              <div class="action-list" id="actionList" aria-live="polite"></div>
+
+              <div class="section-head subhead">
                 <div>
                   <p class="eyebrow">Live agent log</p>
                   <h3>Recent activity</h3>
@@ -133,9 +154,32 @@
               </div>
               <button class="secondary-action" id="scanDefault" type="button">Scan default folder</button>
             </div>
+            <div class="metrics-row" id="scanMetrics"></div>
             <div class="input-row wide">
               <input id="scanPath" type="text" aria-label="File or folder path to scan">
               <button class="primary-action" id="scanPathButton" type="button">Scan path</button>
+            </div>
+            <div class="section-head subhead">
+              <div>
+                <p class="eyebrow">Realtime coverage</p>
+                <h3>Protected paths</h3>
+              </div>
+              <button class="secondary-action" id="resetProtectedPaths" type="button">Reset defaults</button>
+            </div>
+            <div class="input-row wide">
+              <input id="protectedPathInput" type="text" aria-label="Folder or file path to protect">
+              <button class="secondary-action" id="addProtectedPath" type="button">Add protected path</button>
+            </div>
+            <div class="rules-list compact" id="protectedPathList"></div>
+            <div class="toolbar-row">
+              <input id="scanFindingSearch" type="search" aria-label="Search scan findings">
+              <select id="scanRiskFilter" aria-label="Filter scan findings by risk">
+                <option value="all">All risks</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
             </div>
             <div class="result-box" id="scanSummary"></div>
             <div class="findings-list" id="scanFindings"></div>
@@ -152,6 +196,16 @@
               <button class="secondary-action" id="refreshTraffic" type="button">Refresh traffic</button>
             </div>
             <div class="result-box" id="trafficHelp">Loading traffic context...</div>
+            <div class="metrics-row" id="trafficMetrics"></div>
+            <div class="toolbar-row">
+              <input id="trafficSearch" type="search" aria-label="Search traffic by process, host, IP, or path">
+              <select id="trafficRiskFilter" aria-label="Filter traffic by risk">
+                <option value="all">All risks</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="info">Info</option>
+              </select>
+            </div>
             <div class="table-wrap">
               <table>
                 <thead>
@@ -184,7 +238,20 @@
                 <p class="eyebrow">Contained files</p>
                 <h3>Quarantine</h3>
               </div>
-              <button class="secondary-action" id="refreshQuarantine" type="button">Refresh</button>
+              <div class="section-actions">
+                <button class="secondary-action" id="purgeQuarantineHistory" type="button">Clean history</button>
+                <button class="secondary-action" id="refreshQuarantine" type="button">Refresh</button>
+              </div>
+            </div>
+            <div class="metrics-row" id="quarantineMetrics"></div>
+            <div class="toolbar-row">
+              <input id="quarantineSearch" type="search" aria-label="Search quarantine">
+              <select id="quarantineStatusFilter" aria-label="Filter quarantine by status">
+                <option value="all">All statuses</option>
+                <option value="contained">Contained</option>
+                <option value="restored">Restored</option>
+                <option value="deleted">Deleted</option>
+              </select>
             </div>
             <div class="quarantine-list" id="quarantineList"></div>
           </section>
@@ -198,6 +265,18 @@
                 <h3>Apps that start automatically</h3>
               </div>
               <button class="secondary-action" id="refreshStartup" type="button">Audit startup</button>
+            </div>
+            <div class="metrics-row" id="startupMetrics"></div>
+            <div class="toolbar-row">
+              <input id="startupSearch" type="search" aria-label="Search startup apps and tasks">
+              <select id="startupFilter" aria-label="Filter startup entries">
+                <option value="all">All entries</option>
+                <option value="toggleable">Apps you can control</option>
+                <option value="system">Protected system tasks</option>
+                <option value="disabled">Disabled</option>
+                <option value="high">High risk</option>
+                <option value="medium">Medium risk</option>
+              </select>
             </div>
             <div class="findings-list" id="startupList"></div>
           </section>
@@ -231,6 +310,18 @@
               <input id="hashInput" type="text" aria-label="SHA-256 hash to block">
               <button class="primary-action" id="addHash" type="button">Block hash</button>
             </div>
+            <div class="section-head subhead">
+              <div>
+                <p class="eyebrow">Bulk operations</p>
+                <h3>Import or export rules</h3>
+              </div>
+              <button class="secondary-action" id="exportBlocklists" type="button">Export blocklists</button>
+            </div>
+            <textarea id="bulkBlocklistInput" aria-label="Bulk blocklist import"></textarea>
+            <div class="decision-actions">
+              <button class="secondary-action" id="importBlocklists" type="button">Import entries</button>
+              <button class="secondary-action" id="downloadReportFromRules" type="button">Download report</button>
+            </div>
             <div class="rules-list" id="blocklistList"></div>
           </section>
         </section>
@@ -238,24 +329,24 @@
         <section class="view" id="learn" aria-labelledby="viewTitle">
           <section class="panel learn-grid">
             <article>
-              <p class="eyebrow">What runs today</p>
-              <h3>User-mode agent</h3>
-              <p>This build scans real files, tracks quarantine, reads live TCP connections, and explains risk locally.</p>
+              <p class="eyebrow">Daily flow</p>
+              <h3>Scan, review, contain</h3>
+              <p>Start with protected folders, review high-risk findings first, then quarantine only files you recognize as unsafe or unwanted.</p>
             </article>
             <article>
-              <p class="eyebrow">What comes next</p>
-              <h3>Kernel sensor</h3>
-              <p>Industry endpoint protection adds signed minifilter, process, registry, and WFP drivers after the policy engine is stable.</p>
+              <p class="eyebrow">Traffic</p>
+              <h3>Understand before blocking</h3>
+              <p>Browser connections often fan out through cloud providers. Block IPs when a process, destination, and timing all look wrong.</p>
             </article>
             <article>
-              <p class="eyebrow">Safe investigation</p>
-              <h3>Defensive only</h3>
-              <p>ClearGuard can inspect, explain, quarantine, and block. It does not attack sites, bypass access controls, or exploit traffic.</p>
+              <p class="eyebrow">Startup</p>
+              <h3>Control persistence</h3>
+              <p>Disable unknown user startup entries first. Windows system tasks are shown for visibility and protected from casual toggling.</p>
             </article>
             <article>
-              <p class="eyebrow">Moat</p>
-              <h3>Human-readable control</h3>
-              <p>The product wedge is security decisions normal people can understand, with expert-grade telemetry behind the scenes.</p>
+              <p class="eyebrow">Rules</p>
+              <h3>Layer local policy</h3>
+              <p>Use domains for websites, hashes for known files, and IP blocks for specific live destinations that keep reappearing.</p>
             </article>
           </section>
         </section>

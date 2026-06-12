@@ -719,6 +719,60 @@ def save_quarantine(items: list[dict[str, Any]]) -> None:
     quarantine_index_path().write_text(json.dumps(items, indent=2), encoding="utf-8")
 
 
+def normalize_local_path(raw_path: str, must_exist: bool = True) -> str:
+    value = raw_path.strip().strip("\"'")
+    if not value:
+        raise ValueError("Path is required.")
+    path = Path(value).expanduser()
+    if must_exist and not path.exists():
+        raise ValueError("Path does not exist on this device.")
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
+def update_protected_paths(action: str, raw_path: str = "") -> dict[str, Any]:
+    config = load_config()
+    paths = [normalize_local_path(str(item), must_exist=False) for item in config.get("protected_paths", [])]
+    if action == "add":
+        normalized = normalize_local_path(raw_path)
+        paths = sorted(set([*paths, normalized]))
+        detail = f"Added protected path {normalized}"
+    elif action == "remove":
+        normalized = normalize_local_path(raw_path, must_exist=False)
+        paths = [item for item in paths if item.lower() != normalized.lower()]
+        detail = f"Removed protected path {normalized}"
+    elif action == "reset":
+        paths = default_scan_paths()
+        detail = "Reset protected paths to default folders"
+    else:
+        raise ValueError("Unknown protected path action.")
+    config["protected_paths"] = paths
+    save_config(config)
+    if SEEN_PATH.exists():
+        SEEN_PATH.unlink()
+    log_activity("settings", detail, "Realtime monitor baseline will rebuild on the next pass.", "low")
+    return {"protected_paths": paths}
+
+
+def clear_activity_log() -> dict[str, Any]:
+    if ACTIVITY_PATH.exists():
+        ACTIVITY_PATH.unlink()
+    return {"ok": True}
+
+
+def quarantine_maintenance(action: str) -> dict[str, Any]:
+    items = load_quarantine()
+    if action == "purge_inactive":
+        active = [item for item in items if item.get("status") == "contained"]
+        save_quarantine(active)
+        removed = len(items) - len(active)
+        log_activity("quarantine", "Cleaned quarantine history", f"Removed {removed} inactive quarantine record(s).", "low")
+        return {"ok": True, "removed": removed, "remaining": len(active)}
+    raise ValueError("Unknown quarantine maintenance action.")
+
+
 def quarantine_file(target: str, reason: str | None = None) -> dict[str, Any]:
     path = Path(target).expanduser().resolve()
     if not path.exists() or not path.is_file():
@@ -1116,6 +1170,83 @@ def remove_hosts_domain_block(domain: str) -> dict[str, Any]:
     return {"os_enforced_removed": removed}
 
 
+def import_blocklist_items(raw_text: str) -> dict[str, Any]:
+    tokens = [item.strip() for item in re.split(r"[\r\n,;]+", raw_text or "") if item.strip()]
+    if not tokens:
+        raise ValueError("Paste at least one domain, IP address, or SHA-256 hash.")
+    config = load_config()
+    domains = set(config.get("blocked_domains", []))
+    hashes = set(config.get("blocked_hashes", []))
+    imported_domains: list[str] = []
+    imported_hashes: list[str] = []
+    imported_ips: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for token in tokens[:500]:
+        cleaned = token.strip().strip("\"'` ")
+        if not cleaned or cleaned.startswith("#"):
+            continue
+        lowered = cleaned.lower()
+        if re.fullmatch(r"[a-f0-9]{64}", lowered):
+            hashes.add(lowered)
+            imported_hashes.append(lowered)
+            continue
+        try:
+            ipaddress.ip_address(cleaned.split("%")[0])
+            if is_admin():
+                block_ip(cleaned)
+                imported_ips.append(cleaned)
+            else:
+                skipped.append({"value": cleaned, "reason": "IP firewall import requires Administrator rights."})
+            continue
+        except ValueError:
+            pass
+        try:
+            domain = sanitize_domain(cleaned)
+            domains.add(domain)
+            imported_domains.append(domain)
+        except ValueError as exc:
+            skipped.append({"value": cleaned, "reason": str(exc)})
+    config["blocked_domains"] = sorted(domains)
+    config["blocked_hashes"] = sorted(hashes)
+    save_config(config)
+    for domain in sorted(set(imported_domains)):
+        apply_hosts_domain_block(domain)
+    log_activity(
+        "settings",
+        "Imported blocklist entries",
+        f"{len(set(imported_domains))} domain(s), {len(set(imported_hashes))} hash(es), {len(imported_ips)} IP block(s), {len(skipped)} skipped.",
+        "medium",
+    )
+    return {
+        "blocked_domains": config["blocked_domains"],
+        "blocked_hashes": config["blocked_hashes"],
+        "imported_domains": sorted(set(imported_domains)),
+        "imported_hashes": sorted(set(imported_hashes)),
+        "imported_ips": imported_ips,
+        "skipped": skipped,
+    }
+
+
+def security_report() -> dict[str, Any]:
+    config = load_config()
+    quarantine = load_quarantine()
+    contained = [item for item in quarantine if item.get("status") == "contained"]
+    return {
+        "generated_at": now_iso(),
+        "status": status(),
+        "protected_paths": config.get("protected_paths", []),
+        "blocked_domains": config.get("blocked_domains", []),
+        "blocked_hashes": config.get("blocked_hashes", []),
+        "blocked_ips": blocked_ips(),
+        "quarantine": {
+            "contained_count": len(contained),
+            "history_count": len(quarantine),
+            "items": quarantine[:100],
+        },
+        "recent_activity": recent_activity(100),
+    }
+
+
 def startup_entry_id(row: dict[str, Any]) -> str:
     payload = {
         "type": row.get("Type") or row.get("type"),
@@ -1455,6 +1586,8 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
                 json_response(self, {"blocked_domains": config.get("blocked_domains", []), "blocked_hashes": config.get("blocked_hashes", [])})
             elif self.path == "/api/startup-audit":
                 json_response(self, startup_audit())
+            elif self.path == "/api/report":
+                json_response(self, security_report())
             else:
                 super().do_GET()
         except Exception as exc:
@@ -1490,6 +1623,8 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
                         label = key.replace("_", " ")
                         log_activity("settings", f"{label} {'enabled' if config[key] else 'disabled'}", "User updated local policy.", "low")
                 json_response(self, config)
+            elif self.path == "/api/protected-paths":
+                json_response(self, update_protected_paths(str(body.get("action", "")), str(body.get("path", ""))))
             elif self.path == "/api/block-ip":
                 json_response(self, block_ip(str(body.get("remote_address", ""))))
             elif self.path == "/api/unblock-ip":
@@ -1526,6 +1661,8 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
                 save_config(config)
                 log_activity("settings", f"Blocked hash {file_hash[:12]}", "Added to local ClearGuard hash blocklist.", "medium")
                 json_response(self, {"blocked_hashes": config["blocked_hashes"]})
+            elif self.path == "/api/blocklist-import":
+                json_response(self, import_blocklist_items(str(body.get("text", ""))))
             elif self.path == "/api/unblock-domain":
                 domain = sanitize_domain(str(body.get("domain", "")))
                 config = load_config()
@@ -1544,6 +1681,10 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
             elif self.path == "/api/test-notification":
                 notify_user("ClearGuard test alert", "Laptop notifications are enabled.", "high")
                 json_response(self, {"ok": True})
+            elif self.path == "/api/activity-clear":
+                json_response(self, clear_activity_log())
+            elif self.path == "/api/quarantine-maintenance":
+                json_response(self, quarantine_maintenance(str(body.get("action", ""))))
             else:
                 json_response(self, {"error": "Not found"}, 404)
         except Exception as exc:
