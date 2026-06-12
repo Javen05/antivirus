@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,9 +33,13 @@ MAX_SCAN_FILES = 1200
 MONITOR_INTERVAL_SECONDS = 8
 MONITOR_PASS_LIMIT = 350
 MONITOR_STARTED = False
+SCAN_JOBS: dict[str, dict[str, Any]] = {}
+SCAN_JOBS_LOCK = threading.Lock()
+SCAN_JOB_LIMIT = 12
 HOSTS_PATH = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "drivers" / "etc" / "hosts"
 CLEARGUARD_HOSTS_MARKER = "# ClearGuard domain block"
 PROTECTED_FIREWALL_PREFIXES = ("codex_sandbox_",)
+TRANSIENT_ACTIVITY_TITLES = {"Could not read TCP connections", "Could not read ClearGuard firewall rules"}
 SCRIPT_PATTERNS = [
     (re.compile(rb"powershell(\.exe)?\s+(-enc|-encodedcommand)", re.I), "Encoded PowerShell command"),
     (re.compile(rb"invoke-webrequest|downloadstring|start-bitstransfer", re.I), "Script downloads remote code"),
@@ -206,6 +211,24 @@ def log_activity(kind: str, title: str, detail: str, risk: str = "low", extra: d
         handle.write(json.dumps(event) + "\n")
 
 
+def friendly_error_detail(error: Exception | str) -> str:
+    detail = str(error)
+    if "timed out" in detail.lower() and "powershell" in detail.lower():
+        return "Windows took too long to answer this local query, so ClearGuard skipped that refresh to keep the app responsive."
+    if "Command '['" in detail:
+        return "A local Windows command failed. Open the related page and retry the action."
+    return detail
+
+
+def normalize_activity_event(event: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(event)
+    detail = str(cleaned.get("detail", ""))
+    cleaned["detail"] = friendly_error_detail(detail)
+    if len(cleaned["detail"]) > 260:
+        cleaned["detail"] = cleaned["detail"][:257].rstrip() + "..."
+    return cleaned
+
+
 def notify_user(title: str, message: str, risk: str = "medium") -> None:
     try:
         if not load_config().get("notifications_enabled", True):
@@ -224,18 +247,28 @@ def notify_user(title: str, message: str, risk: str = "medium") -> None:
         pass
 
 
-def recent_activity(limit: int = 50) -> list[dict[str, Any]]:
+def recent_activity(limit: int = 50, include_transient: bool = True) -> list[dict[str, Any]]:
     ensure_dirs()
     if not ACTIVITY_PATH.exists():
         return []
     lines = ACTIVITY_PATH.read_text(encoding="utf-8").splitlines()
     events = []
-    for line in lines[-limit:]:
+    seen = set()
+    for line in reversed(lines):
         try:
-            events.append(json.loads(line))
+            event = normalize_activity_event(json.loads(line))
         except json.JSONDecodeError:
             continue
-    return list(reversed(events))
+        if not include_transient and event.get("title") in TRANSIENT_ACTIVITY_TITLES:
+            continue
+        key = (event.get("kind"), event.get("title"), event.get("detail"))
+        if key in seen:
+            continue
+        seen.add(key)
+        events.append(event)
+        if len(events) >= limit:
+            break
+    return events
 
 
 def read_head(path: Path, limit: int = MAX_FILE_BYTES) -> bytes:
@@ -615,6 +648,90 @@ def scan_path(target: str) -> dict[str, Any]:
     return summary
 
 
+def resolve_scan_target(target: Any) -> str:
+    if target:
+        return str(target)
+    paths = load_config().get("protected_paths", [])
+    if not paths:
+        raise ValueError("No default protected paths found.")
+    return str(paths[0])
+
+
+def prune_scan_jobs() -> None:
+    with SCAN_JOBS_LOCK:
+        if len(SCAN_JOBS) <= SCAN_JOB_LIMIT:
+            return
+        sorted_jobs = sorted(SCAN_JOBS.values(), key=lambda item: item.get("started_at", ""))
+        for job in sorted_jobs[: max(0, len(SCAN_JOBS) - SCAN_JOB_LIMIT)]:
+            if job.get("status") != "running":
+                SCAN_JOBS.pop(str(job.get("id")), None)
+
+
+def scan_job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
+    snapshot = dict(job)
+    started = snapshot.get("started_epoch")
+    if isinstance(started, (int, float)) and snapshot.get("status") == "running":
+        snapshot["elapsed_seconds"] = round(time.time() - started, 1)
+    snapshot.pop("started_epoch", None)
+    return snapshot
+
+
+def start_scan_job(target: str) -> dict[str, Any]:
+    path = resolve_scan_target(target)
+    job_id = uuid.uuid4().hex[:12]
+    job = {
+        "id": job_id,
+        "status": "running",
+        "target": path,
+        "started_at": now_iso(),
+        "started_epoch": time.time(),
+        "elapsed_seconds": 0,
+        "result": None,
+        "error": None,
+    }
+    with SCAN_JOBS_LOCK:
+        SCAN_JOBS[job_id] = job
+
+    def worker() -> None:
+        try:
+            result = scan_path(path)
+            with SCAN_JOBS_LOCK:
+                job.update(
+                    {
+                        "status": "completed",
+                        "finished_at": now_iso(),
+                        "elapsed_seconds": result.get("duration_seconds"),
+                        "result": result,
+                    }
+                )
+        except Exception as exc:
+            with SCAN_JOBS_LOCK:
+                job.update(
+                    {
+                        "status": "failed",
+                        "finished_at": now_iso(),
+                        "elapsed_seconds": round(time.time() - float(job.get("started_epoch", time.time())), 1),
+                        "error": friendly_error_detail(exc),
+                    }
+                )
+            log_activity("scan", "Scan failed", friendly_error_detail(exc), "medium", {"target": path})
+        finally:
+            prune_scan_jobs()
+
+    threading.Thread(target=worker, name=f"ClearGuardScan-{job_id}", daemon=True).start()
+    return scan_job_snapshot(job)
+
+
+def get_scan_job(job_id: str) -> dict[str, Any]:
+    if not job_id:
+        raise ValueError("Scan job id is required.")
+    with SCAN_JOBS_LOCK:
+        job = SCAN_JOBS.get(job_id)
+        if not job:
+            raise ValueError("Scan job was not found. It may have finished before this console was refreshed.")
+        return scan_job_snapshot(job)
+
+
 def load_seen_files() -> dict[str, float]:
     if not SEEN_PATH.exists():
         return {}
@@ -942,7 +1059,7 @@ def connection_explanation(process: str, remote: str, port: Any, enrich: bool = 
     return {"risk": risk, "host": host, "service_hint": hint, "findings": findings}
 
 
-def network_connections(enrich: bool = True) -> list[dict[str, Any]]:
+def network_connections(enrich: bool = True, log_errors: bool = True, timeout: int = 12) -> list[dict[str, Any]]:
     script = r"""
     $conns = Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue |
       Where-Object { $_.RemoteAddress -and $_.RemoteAddress -notin @('0.0.0.0','::','127.0.0.1','::1') } |
@@ -971,9 +1088,10 @@ def network_connections(enrich: bool = True) -> list[dict[str, Any]]:
     } | ConvertTo-Json -Depth 4
     """
     try:
-        rows = powershell_json(script)
+        rows = powershell_json(script, timeout=timeout)
     except Exception as exc:
-        log_activity("network", "Could not read TCP connections", str(exc), "medium")
+        if log_errors:
+            log_activity("network", "Could not read TCP connections", friendly_error_detail(exc), "medium")
         return []
 
     results = []
@@ -1054,7 +1172,7 @@ def unblock_rule(rule_name: str) -> dict[str, Any]:
     return {"rule": rule_name, "output": completed.stdout.strip()}
 
 
-def blocked_ips() -> list[dict[str, Any]]:
+def blocked_ips(log_errors: bool = True, timeout: int = 16) -> list[dict[str, Any]]:
     script = r"""
     $rules = Get-NetFirewallRule -ErrorAction SilentlyContinue |
       Where-Object { $_.Direction -eq 'Outbound' -and $_.Action -eq 'Block' -and $_.Enabled -eq 'True' } |
@@ -1076,9 +1194,10 @@ def blocked_ips() -> list[dict[str, Any]]:
     $items | ConvertTo-Json -Depth 4
     """
     try:
-        rows = powershell_json(script)
+        rows = powershell_json(script, timeout=timeout)
     except Exception as exc:
-        log_activity("network", "Could not read ClearGuard firewall rules", str(exc), "medium")
+        if log_errors:
+            log_activity("network", "Could not read ClearGuard firewall rules", friendly_error_detail(exc), "medium")
         return []
     results = []
     for row in rows:
@@ -1489,7 +1608,7 @@ def investigate_url(raw_url: str) -> dict[str, Any]:
 
 def status() -> dict[str, Any]:
     config = load_config()
-    network = network_connections(enrich=False)
+    network = network_connections(enrich=False, log_errors=False, timeout=10)
     defender = defender_status()
     high_network = sum(1 for item in network if item["risk"] == "high")
     medium_network = sum(1 for item in network if item["risk"] == "medium")
@@ -1522,14 +1641,14 @@ def status() -> dict[str, Any]:
         "network_count": len(network),
         "high_network_count": high_network,
         "is_admin": is_admin(),
-        "blocked_ip_count": len(blocked_ips()),
+        "blocked_ip_count": len(blocked_ips(log_errors=False, timeout=10)),
         "realtime_enabled": config.get("realtime_enabled", True),
         "notifications_enabled": config.get("notifications_enabled", True),
         "defender_enabled": config.get("defender_enabled", True),
         "defender_status": defender,
         "persistence_installed": persistence_installed(),
         "rules": config.get("rules", []),
-        "activity": recent_activity(8),
+        "activity": recent_activity(8, include_transient=False),
     }
 
 
@@ -1565,29 +1684,34 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         try:
-            if self.path in {"/", "/index.html"}:
+            parsed = urllib.parse.urlparse(self.path)
+            route = parsed.path
+            query = urllib.parse.parse_qs(parsed.query)
+            if route in {"/", "/index.html"}:
                 self.send_response(302)
                 self.send_header("Location", "/console.html")
                 self.end_headers()
-            elif self.path == "/api/status":
+            elif route == "/api/status":
                 json_response(self, status())
-            elif self.path == "/api/activity":
+            elif route == "/api/activity":
                 json_response(self, recent_activity(50))
-            elif self.path == "/api/quarantine":
+            elif route == "/api/quarantine":
                 json_response(self, load_quarantine())
-            elif self.path == "/api/network":
+            elif route == "/api/network":
                 json_response(self, network_connections())
-            elif self.path == "/api/blocked-ips":
+            elif route == "/api/blocked-ips":
                 json_response(self, blocked_ips())
-            elif self.path == "/api/rules":
+            elif route == "/api/rules":
                 json_response(self, load_config().get("rules", []))
-            elif self.path == "/api/blocklists":
+            elif route == "/api/blocklists":
                 config = load_config()
                 json_response(self, {"blocked_domains": config.get("blocked_domains", []), "blocked_hashes": config.get("blocked_hashes", [])})
-            elif self.path == "/api/startup-audit":
+            elif route == "/api/startup-audit":
                 json_response(self, startup_audit())
-            elif self.path == "/api/report":
+            elif route == "/api/report":
                 json_response(self, security_report())
+            elif route == "/api/scan-job":
+                json_response(self, get_scan_job((query.get("id") or [""])[0]))
             else:
                 super().do_GET()
         except Exception as exc:
@@ -1597,13 +1721,9 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
         try:
             body = read_json(self)
             if self.path == "/api/scan":
-                target = body.get("path")
-                if not target:
-                    paths = load_config().get("protected_paths", [])
-                    if not paths:
-                        raise ValueError("No default protected paths found.")
-                    target = paths[0]
-                json_response(self, scan_path(str(target)))
+                json_response(self, scan_path(resolve_scan_target(body.get("path"))))
+            elif self.path == "/api/scan-job":
+                json_response(self, start_scan_job(resolve_scan_target(body.get("path"))))
             elif self.path == "/api/quarantine":
                 json_response(self, quarantine_file(str(body.get("path", "")), body.get("reason")))
             elif self.path.startswith("/api/quarantine/"):

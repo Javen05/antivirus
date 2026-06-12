@@ -17,6 +17,8 @@ let scanResults = [];
 let trafficRows = [];
 let quarantineItems = [];
 let startupRows = [];
+let activeScanJobId = null;
+let scanPollTimer = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -315,29 +317,89 @@ async function refreshStatus() {
 async function runScan(path) {
   const summary = qs("#scanSummary");
   const findings = qs("#scanFindings");
-  summary.textContent = "Scanning files...";
+  if (activeScanJobId) {
+    summary.textContent = "A scan is already running. ClearGuard will show the result here when it finishes.";
+    return;
+  }
+  summary.textContent = "Starting background scan...";
   findings.replaceChildren();
+  scanResults = [];
   try {
-    const result = await api("/api/scan", {
+    const job = await api("/api/scan-job", {
       method: "POST",
       body: JSON.stringify({ path })
     });
-    const risky = result.risky.length;
-    scanResults = result.risky || [];
-    summary.innerHTML = `
-      <strong>${result.file_count} file(s) scanned</strong><br>
-      ${risky} item(s) need review. Completed in ${result.duration_seconds}s.<br>
-      Malware engine: ${result.defender?.available ? `${result.defender.ok ? "Defender scan completed" : "Defender scan had an issue"} (${result.defender.detection_count} detection(s))` : "Defender unavailable or disabled"}.<br>
-      Target: ${result.target}
-    `;
-    if (!risky) {
-      empty(findings, "No risky files found by local rules.");
-    } else {
-      renderFindings();
-    }
-    await refreshStatus();
+    activeScanJobId = job.id;
+    setScanControlsRunning(true);
+    renderScanJob(job);
+    pollScanJob(job.id);
   } catch (error) {
     summary.textContent = error.message;
+    activeScanJobId = null;
+    setScanControlsRunning(false);
+  }
+}
+
+function setScanControlsRunning(running) {
+  [qs("#scanDefault"), qs("#scanPathButton")].forEach((button) => {
+    if (!button) return;
+    button.disabled = running;
+    button.classList.toggle("is-loading", running);
+  });
+}
+
+function renderScanJob(job) {
+  const summary = qs("#scanSummary");
+  const elapsed = job.elapsed_seconds ?? 0;
+  summary.innerHTML = `
+    <strong>Scan running in the background</strong><br>
+    Target: ${job.target}<br>
+    Elapsed: ${elapsed}s. You can stay on this page or use other ClearGuard pages while it runs.
+  `;
+}
+
+function finishScanJob(result) {
+  const summary = qs("#scanSummary");
+  const findings = qs("#scanFindings");
+  const risky = result.risky.length;
+  scanResults = result.risky || [];
+  summary.innerHTML = `
+    <strong>${result.file_count} file(s) scanned</strong><br>
+    ${risky} item(s) need review. Completed in ${result.duration_seconds}s.<br>
+    Malware engine: ${result.defender?.available ? `${result.defender.ok ? "Defender scan completed" : "Defender scan had an issue"} (${result.defender.detection_count} detection(s))` : "Defender unavailable or disabled"}.<br>
+    Target: ${result.target}${result.truncated ? "<br>Large folder safety limit reached; ClearGuard scanned the first batch instead of timing out the UI." : ""}
+  `;
+  if (!risky) {
+    empty(findings, "No risky files found by local rules.");
+  } else {
+    renderFindings();
+  }
+}
+
+async function pollScanJob(jobId) {
+  window.clearTimeout(scanPollTimer);
+  let stillRunning = false;
+  try {
+    const job = await api(`/api/scan-job?id=${encodeURIComponent(jobId)}`);
+    if (job.status === "running") {
+      renderScanJob(job);
+      stillRunning = true;
+      scanPollTimer = window.setTimeout(() => pollScanJob(jobId), 1500);
+      return;
+    }
+    if (job.status === "completed") {
+      finishScanJob(job.result);
+      await refreshStatus();
+    } else {
+      qs("#scanSummary").textContent = job.error || "Scan failed.";
+    }
+  } catch (error) {
+    qs("#scanSummary").textContent = error.message;
+  } finally {
+    if (!stillRunning && activeScanJobId === jobId) {
+      activeScanJobId = null;
+      setScanControlsRunning(false);
+    }
   }
 }
 
