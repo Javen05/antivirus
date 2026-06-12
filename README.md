@@ -65,8 +65,9 @@ Limitations in this prototype:
 ## What Works Now
 
 - Real file and folder scanning.
+- Microsoft Defender custom-scan integration for real malware detection using local Defender definitions.
 - SHA-256 hashing for scanned files.
-- EICAR antivirus test signature detection.
+- EICAR antivirus test string recognition for verifying the scanner path only.
 - Script behavior heuristics for encoded PowerShell, remote code download chains, `certutil`, `mshta`, `rundll32`, backup deletion, and Defender-disabling attempts.
 - Risk elevation for executable/script-like files in user-writable launch locations.
 - Real quarantine with restore/delete metadata.

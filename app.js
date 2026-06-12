@@ -79,6 +79,13 @@ function renderStatus(status) {
     ? `${status.quarantine_count} file(s) are contained.`
     : "No files contained.";
   qs("#realtimeStatus").textContent = `${status.realtime_enabled ? "Realtime monitor on" : "Realtime monitor off"}. ${status.notifications_enabled ? "Notifications on" : "Notifications off"}. ${status.persistence_installed ? "Starts at login." : "Run install script to start at login."}`;
+  const defender = status.defender_status || {};
+  qs("#engineStatus").textContent = status.defender_enabled
+    ? defender.Available
+      ? `Defender ${defender.AntivirusEnabled ? "on" : "off"}. Realtime ${defender.RealTimeProtectionEnabled ? "on" : "off"}. Definitions ${defender.AntivirusSignatureVersion || "unknown"}.`
+      : `Defender unavailable: ${defender.Error || "unknown error"}`
+    : "Defender engine disabled in ClearGuard settings.";
+  qs("#defenderToggle").checked = Boolean(status.defender_enabled);
   qs("#realtimeToggle").checked = Boolean(status.realtime_enabled);
   qs("#notificationsToggle").checked = Boolean(status.notifications_enabled);
   renderActivity(status.activity || []);
@@ -162,6 +169,7 @@ async function runScan(path) {
     summary.innerHTML = `
       <strong>${result.file_count} file(s) scanned</strong><br>
       ${risky} item(s) need review. Completed in ${result.duration_seconds}s.<br>
+      Malware engine: ${result.defender?.available ? `${result.defender.ok ? "Defender scan completed" : "Defender scan had an issue"} (${result.defender.detection_count} detection(s))` : "Defender unavailable or disabled"}.<br>
       Target: ${result.target}
     `;
     if (!risky) {
@@ -191,7 +199,7 @@ function renderFindings(items) {
     `;
     qs("h4", article).textContent = `${item.risk.toUpperCase()} - ${item.name}`;
     qs("p", article).textContent = item.findings.join(" ");
-    qs("small", article).textContent = item.path;
+    qs("small", article).textContent = `${(item.sources || ["ClearGuard heuristics"]).join(" + ")} - ${item.path}`;
     qs("button", article).addEventListener("click", async () => {
       await api("/api/quarantine", {
         method: "POST",
@@ -395,6 +403,7 @@ qs("#refreshTraffic").addEventListener("click", refreshTraffic);
 qs("#refreshBlocked").addEventListener("click", refreshBlocked);
 qs("#refreshQuarantine").addEventListener("click", refreshQuarantine);
 qs("#checkUrl").addEventListener("click", checkUrl);
+qs("#defenderToggle").addEventListener("change", (event) => updateSetting("defender_enabled", event.target.checked));
 qs("#realtimeToggle").addEventListener("change", (event) => updateSetting("realtime_enabled", event.target.checked));
 qs("#notificationsToggle").addEventListener("change", (event) => updateSetting("notifications_enabled", event.target.checked));
 qs("#testNotification").addEventListener("click", async () => {

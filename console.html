@@ -76,6 +76,13 @@
                 <p id="realtimeStatus">Checking monitor and notification settings...</p>
               </div>
             </article>
+            <article class="status-tile">
+              <div class="tile-icon" aria-hidden="true">M</div>
+              <div>
+                <h3>Malware engine</h3>
+                <p id="engineStatus">Checking Microsoft Defender status...</p>
+              </div>
+            </article>
           </div>
 
           <section class="panel split-panel">
@@ -94,6 +101,7 @@
               <h3>Warn me outside the browser</h3>
               <p>ClearGuard can monitor protected folders while the agent is running and show Windows pop-up alerts for high-risk findings.</p>
               <div class="toggle-list">
+                <label><input id="defenderToggle" type="checkbox"> Microsoft Defender malware engine</label>
                 <label><input id="realtimeToggle" type="checkbox"> Realtime folder monitoring</label>
                 <label><input id="notificationsToggle" type="checkbox"> Laptop notifications</label>
               </div>

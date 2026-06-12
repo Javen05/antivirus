@@ -113,6 +113,7 @@ def ensure_dirs() -> None:
                 "last_scan": None,
                 "realtime_enabled": True,
                 "notifications_enabled": True,
+                "defender_enabled": True,
             }
         )
 
@@ -126,9 +127,9 @@ def default_scan_paths() -> list[str]:
 def built_in_rules() -> list[dict[str, str]]:
     return [
         {
-            "name": "Antivirus test signature",
-            "plain": "Quarantine any file containing the EICAR antivirus test string.",
-            "action": "quarantine",
+            "name": "Microsoft Defender malware engine",
+            "plain": "Use the local Microsoft Defender engine and current malware definitions for real malware detection.",
+            "action": "scan and alert",
         },
         {
             "name": "Script payload chain",
@@ -159,11 +160,15 @@ def load_config() -> dict[str, Any]:
         "last_scan": None,
         "realtime_enabled": True,
         "notifications_enabled": True,
+        "defender_enabled": True,
     }
     for key, value in defaults.items():
         if key not in config:
             config[key] = value
             changed = True
+    if any(rule.get("name") == "Antivirus test signature" for rule in config.get("rules", [])):
+        config["rules"] = built_in_rules()
+        changed = True
     if changed:
         save_config(config)
     return config
@@ -252,6 +257,141 @@ def risk_rank(risk: str) -> int:
     return {"clean": 0, "info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}.get(risk, 1)
 
 
+def defender_status() -> dict[str, Any]:
+    script = r"""
+    try {
+      $status = Get-MpComputerStatus -ErrorAction Stop
+      [PSCustomObject]@{
+        Available=$true
+        AMServiceEnabled=$status.AMServiceEnabled
+        AntivirusEnabled=$status.AntivirusEnabled
+        RealTimeProtectionEnabled=$status.RealTimeProtectionEnabled
+        AntispywareSignatureLastUpdated=$status.AntispywareSignatureLastUpdated
+        AntivirusSignatureVersion=$status.AntivirusSignatureVersion
+        QuickScanEndTime=$status.QuickScanEndTime
+      } | ConvertTo-Json -Depth 4
+    } catch {
+      [PSCustomObject]@{
+        Available=$false
+        Error=$_.Exception.Message
+      } | ConvertTo-Json -Depth 4
+    }
+    """
+    try:
+        rows = powershell_json(script, timeout=12)
+        return rows[0] if rows else {"Available": False, "Error": "No Defender status returned."}
+    except Exception as exc:
+        return {"Available": False, "Error": str(exc)}
+
+
+def defender_threat_detections() -> list[dict[str, Any]]:
+    script = r"""
+    try {
+      Get-MpThreatDetection -ErrorAction Stop |
+        Select-Object -First 100 ThreatID,ThreatName,Resources,InitialDetectionTime,ActionSuccess,ThreatStatusID,CurrentThreatExecutionStatus |
+        ConvertTo-Json -Depth 5
+    } catch {
+      @() | ConvertTo-Json
+    }
+    """
+    try:
+        return powershell_json(script, timeout=15)
+    except Exception:
+        return []
+
+
+def defender_scan_target(target: Path) -> dict[str, Any]:
+    status = defender_status()
+    if not status.get("Available") or not status.get("AntivirusEnabled"):
+        return {"available": False, "error": status.get("Error") or "Microsoft Defender antivirus is not enabled.", "detections": []}
+
+    target_text = str(target)
+    before = detection_keys(defender_threat_detections())
+    scan_script = f"Start-MpScan -ScanType CustomScan -ScanPath {powershell_quote(target_text)} -ErrorAction Stop"
+    started_at = time.time()
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", scan_script],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    detections = defender_threat_detections()
+    after_keys = detection_keys(detections)
+    new_or_matching = [
+        detection for detection in detections
+        if detection_key(detection) not in before or detection_matches_target(detection, target_text)
+    ]
+    return {
+        "available": True,
+        "ok": completed.returncode == 0,
+        "duration_seconds": round(time.time() - started_at, 2),
+        "error": completed.stderr.strip() if completed.returncode else "",
+        "detections": new_or_matching,
+        "new_detection_count": len(after_keys - before),
+    }
+
+
+def powershell_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def detection_key(detection: dict[str, Any]) -> str:
+    resources = detection.get("Resources") or []
+    if not isinstance(resources, list):
+        resources = [str(resources)]
+    return "|".join([str(detection.get("ThreatID")), str(detection.get("ThreatName")), *sorted(str(item) for item in resources)])
+
+
+def detection_keys(detections: list[dict[str, Any]]) -> set[str]:
+    return {detection_key(item) for item in detections}
+
+
+def detection_resources(detection: dict[str, Any]) -> list[str]:
+    resources = detection.get("Resources") or []
+    if isinstance(resources, list):
+        return [str(item) for item in resources]
+    return [str(resources)]
+
+
+def detection_matches_target(detection: dict[str, Any], target: str) -> bool:
+    target_lower = target.lower()
+    return any(target_lower in resource.lower() or resource.lower() in target_lower for resource in detection_resources(detection))
+
+
+def merge_defender_detections(results: list[dict[str, Any]], detections: list[dict[str, Any]], target: Path) -> list[dict[str, Any]]:
+    if not detections:
+        return results
+    by_path = {str(Path(item["path"]).resolve()).lower(): item for item in results if item.get("path")}
+    target_lower = str(target).lower()
+    for detection in detections:
+        threat = str(detection.get("ThreatName") or "Microsoft Defender threat")
+        resources = detection_resources(detection)
+        matched = False
+        for resource in resources:
+            resource_lower = resource.lower().replace("file:_", "").replace("file:", "")
+            for path_key, result in by_path.items():
+                if path_key in resource_lower or resource_lower in path_key:
+                    result["risk"] = "critical"
+                    result["findings"].insert(0, f"Microsoft Defender detected {threat}.")
+                    result.setdefault("sources", []).append("Microsoft Defender")
+                    matched = True
+        if not matched:
+            display_path = resources[0] if resources else str(target)
+            results.append(
+                {
+                    "path": display_path,
+                    "name": Path(display_path.replace("file:_", "").replace("file:", "")).name or threat,
+                    "size": 0,
+                    "sha256": None,
+                    "risk": "critical",
+                    "findings": [f"Microsoft Defender detected {threat}.", f"Resources: {', '.join(resources) or target_lower}"],
+                    "sources": ["Microsoft Defender"],
+                    "scanned_at": now_iso(),
+                }
+            )
+    return results
+
+
 def scan_file(path: Path) -> dict[str, Any]:
     result = {
         "path": str(path),
@@ -260,6 +400,7 @@ def scan_file(path: Path) -> dict[str, Any]:
         "sha256": None,
         "risk": "clean",
         "findings": [],
+        "sources": ["ClearGuard heuristics"],
         "scanned_at": now_iso(),
     }
     try:
@@ -359,6 +500,10 @@ def scan_path(target: str) -> dict[str, Any]:
                 break
 
     results = [scan_file(file_path) for file_path in files]
+    defender_result = {"available": False, "detections": [], "error": "Defender scan not requested."}
+    if load_config().get("defender_enabled", True):
+        defender_result = defender_scan_target(path)
+        results = merge_defender_detections(results, defender_result.get("detections", []), path)
     counts = {"clean": 0, "low": 0, "medium": 0, "high": 0, "critical": 0}
     for result in results:
         counts[result["risk"]] = counts.get(result["risk"], 0) + 1
@@ -371,6 +516,13 @@ def scan_path(target: str) -> dict[str, Any]:
         "truncated": len(files) >= MAX_SCAN_FILES,
         "counts": counts,
         "risky": risky[:100],
+        "defender": {
+            "available": defender_result.get("available", False),
+            "ok": defender_result.get("ok", False),
+            "duration_seconds": defender_result.get("duration_seconds"),
+            "detection_count": len(defender_result.get("detections", [])),
+            "error": defender_result.get("error", ""),
+        },
     }
     config = load_config()
     config["last_scan"] = summary
@@ -447,6 +599,10 @@ def monitor_once() -> None:
         seen[key] = fingerprint
         changed = True
         result = scan_file(path)
+        if config.get("defender_enabled", True):
+            defender_result = defender_scan_target(path)
+            merged = merge_defender_detections([result], defender_result.get("detections", []), path)
+            result = merged[0]
         if risk_rank(result["risk"]) >= risk_rank("high"):
             detail = "; ".join(result["findings"])
             log_activity("realtime", f"Risky file changed: {path.name}", detail, result["risk"], {"path": str(path)})
@@ -858,6 +1014,7 @@ def investigate_url(raw_url: str) -> dict[str, Any]:
 def status() -> dict[str, Any]:
     config = load_config()
     network = network_connections(enrich=False)
+    defender = defender_status()
     high_network = sum(1 for item in network if item["risk"] == "high")
     medium_network = sum(1 for item in network if item["risk"] == "medium")
     quarantine = load_quarantine()
@@ -876,6 +1033,7 @@ def status() -> dict[str, Any]:
             "truncated": last_scan.get("truncated"),
             "counts": counts,
             "risky_count": risky_files,
+            "defender": last_scan.get("defender"),
         }
     ordinary_public_connections = min(medium_network, 10)
     score = max(0, 100 - contained * 6 - min(risky_files, 20) * 2 - high_network * 10 - ordinary_public_connections)
@@ -891,6 +1049,8 @@ def status() -> dict[str, Any]:
         "blocked_ip_count": len(blocked_ips()),
         "realtime_enabled": config.get("realtime_enabled", True),
         "notifications_enabled": config.get("notifications_enabled", True),
+        "defender_enabled": config.get("defender_enabled", True),
+        "defender_status": defender,
         "persistence_installed": persistence_installed(),
         "rules": config.get("rules", []),
         "activity": recent_activity(8),
@@ -963,7 +1123,7 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
                     config["mode"] = mode
                     save_config(config)
                     log_activity("settings", f"Protection mode changed to {mode}", "User updated local policy.", "low")
-                for key in ("realtime_enabled", "notifications_enabled"):
+                for key in ("realtime_enabled", "notifications_enabled", "defender_enabled"):
                     if key in body:
                         config[key] = bool(body[key])
                         save_config(config)
