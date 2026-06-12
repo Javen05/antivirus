@@ -25,10 +25,12 @@
     </header>
 
     <main>
-      <section class="landing-hero">
+      <section class="landing-hero parallax-stage">
+        <div class="hero-aura aura-one" data-parallax="0.18"></div>
+        <div class="hero-aura aura-two" data-parallax="-0.12"></div>
         <div class="hero-copy">
           <p class="eyebrow">Local-first Windows security</p>
-          <h1>Antivirus normal people can actually understand.</h1>
+          <h1><span class="word-pop">Antivirus</span> normal people can actually understand.</h1>
           <p>
             ClearGuard turns file scans, quarantine, and live network traffic into plain-English decisions:
             what happened, why it matters, and what to do next.
@@ -40,12 +42,13 @@
           <p class="hero-note">Prototype build. Runs locally on Windows with Python 3. No file cloud upload required.</p>
         </div>
 
-        <div class="hero-product" aria-label="ClearGuard product preview">
+        <div class="hero-product float-card" aria-label="ClearGuard product preview">
           <div class="product-top">
             <span></span>
             <span></span>
             <span></span>
           </div>
+          <div class="scan-line" aria-hidden="true"></div>
           <div class="product-score">
             <p class="eyebrow">Protection score</p>
             <strong>90%</strong>
@@ -68,7 +71,7 @@
         </div>
       </section>
 
-      <section class="landing-band" id="features">
+      <section class="landing-band reveal" id="features">
         <div class="landing-section-head">
           <p class="eyebrow">What customers get</p>
           <h2>Security controls without security jargon.</h2>
@@ -93,7 +96,7 @@
         </div>
       </section>
 
-      <section class="landing-band alt" id="run">
+      <section class="landing-band alt reveal" id="run">
         <div class="landing-section-head">
           <p class="eyebrow">How to run it</p>
           <h2>Download. Start the agent. Open the console.</h2>
@@ -111,13 +114,18 @@
           </article>
           <article>
             <span>3</span>
+            <h3>Install persistence</h3>
+            <p>Run <code>scripts\install-clearguard.ps1</code> once so ClearGuard starts when you sign in.</p>
+          </article>
+          <article>
+            <span>4</span>
             <h3>Open the console</h3>
             <p>Go to <code>http://127.0.0.1:5288/console.html</code> to scan files and review live traffic.</p>
           </article>
         </div>
       </section>
 
-      <section class="landing-cta">
+      <section class="landing-cta reveal">
         <div>
           <p class="eyebrow">For early adopters</p>
           <h2>Try ClearGuard on a Windows test machine.</h2>
@@ -134,5 +142,6 @@
       <span>ClearGuard AV</span>
       <a href="https://github.com/Javen05/antivirus">GitHub</a>
     </footer>
+    <script src="landing.js"></script>
   </body>
 </html>

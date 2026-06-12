@@ -78,6 +78,9 @@ function renderStatus(status) {
   qs("#quarantineStatus").textContent = status.quarantine_count
     ? `${status.quarantine_count} file(s) are contained.`
     : "No files contained.";
+  qs("#realtimeStatus").textContent = `${status.realtime_enabled ? "Realtime monitor on" : "Realtime monitor off"}. ${status.notifications_enabled ? "Notifications on" : "Notifications off"}. ${status.persistence_installed ? "Starts at login." : "Run install script to start at login."}`;
+  qs("#realtimeToggle").checked = Boolean(status.realtime_enabled);
+  qs("#notificationsToggle").checked = Boolean(status.notifications_enabled);
   renderActivity(status.activity || []);
 }
 
@@ -271,10 +274,25 @@ async function refreshBlocked() {
           <p></p>
           <small></small>
         </div>
+        <button class="secondary-action" type="button">Unblock</button>
       `;
       qs("h4", article).textContent = row.remote_address;
       qs("p", article).textContent = row.name;
       qs("small", article).textContent = `${row.action} ${row.direction} - ${row.enabled}`;
+      qs("button", article).addEventListener("click", async () => {
+        const ok = window.confirm(`Remove this Windows Firewall block rule?\n\n${row.name}`);
+        if (!ok) return;
+        try {
+          await api("/api/unblock-ip", {
+            method: "POST",
+            body: JSON.stringify({ rule_name: row.name })
+          });
+          await refreshBlocked();
+          await refreshStatus();
+        } catch (error) {
+          window.alert(error.message);
+        }
+      });
       list.append(article);
     });
   } catch (error) {
@@ -355,6 +373,14 @@ async function checkUrl() {
   }
 }
 
+async function updateSetting(key, value) {
+  await api("/api/settings", {
+    method: "POST",
+    body: JSON.stringify({ [key]: value })
+  });
+  await refreshStatus();
+}
+
 qsa(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
 qsa(".mode-button").forEach((button) => {
   button.addEventListener("click", async () => {
@@ -369,6 +395,15 @@ qs("#refreshTraffic").addEventListener("click", refreshTraffic);
 qs("#refreshBlocked").addEventListener("click", refreshBlocked);
 qs("#refreshQuarantine").addEventListener("click", refreshQuarantine);
 qs("#checkUrl").addEventListener("click", checkUrl);
+qs("#realtimeToggle").addEventListener("change", (event) => updateSetting("realtime_enabled", event.target.checked));
+qs("#notificationsToggle").addEventListener("change", (event) => updateSetting("notifications_enabled", event.target.checked));
+qs("#testNotification").addEventListener("click", async () => {
+  try {
+    await api("/api/test-notification", { method: "POST", body: JSON.stringify({}) });
+  } catch (error) {
+    window.alert(error.message);
+  }
+});
 
 refreshStatus();
 setInterval(refreshStatus, 30000);

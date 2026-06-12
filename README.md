@@ -38,6 +38,30 @@ http://127.0.0.1:5288/console.html
 
 Run PowerShell as Administrator if you want ClearGuard to create Windows Firewall block rules from the UI.
 
+## Install For Reboot Persistence
+
+To make ClearGuard start again after you power off and sign back into Windows:
+
+```powershell
+.\scripts\install-clearguard.ps1
+```
+
+This creates a Windows Scheduled Task named `ClearGuard AV Agent` that starts the local agent at user logon. Remove it with:
+
+```powershell
+.\scripts\uninstall-clearguard.ps1
+```
+
+## Laptop Notifications
+
+When the agent is running, ClearGuard can watch protected folders such as Downloads, Desktop, and Documents. High-risk file changes trigger a Windows pop-up alert and an activity entry in the console.
+
+Limitations in this prototype:
+
+- It is not a kernel driver yet, so it cannot intercept every file before access.
+- Website warnings happen through the safe URL checker and traffic view, not a browser extension yet.
+- Firewall block/unblock actions require running the agent from an Administrator PowerShell.
+
 ## What Works Now
 
 - Real file and folder scanning.

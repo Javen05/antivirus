@@ -12,6 +12,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -25,8 +26,12 @@ DATA_DIR = ROOT / ".clearguard"
 QUARANTINE_DIR = DATA_DIR / "quarantine"
 CONFIG_PATH = DATA_DIR / "config.json"
 ACTIVITY_PATH = DATA_DIR / "activity.jsonl"
+SEEN_PATH = DATA_DIR / "seen_files.json"
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_SCAN_FILES = 1200
+MONITOR_INTERVAL_SECONDS = 8
+MONITOR_PASS_LIMIT = 350
+MONITOR_STARTED = False
 
 EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 SCRIPT_PATTERNS = [
@@ -106,6 +111,8 @@ def ensure_dirs() -> None:
                 "protected_paths": default_scan_paths(),
                 "rules": built_in_rules(),
                 "last_scan": None,
+                "realtime_enabled": True,
+                "notifications_enabled": True,
             }
         )
 
@@ -143,7 +150,23 @@ def built_in_rules() -> list[dict[str, str]]:
 
 def load_config() -> dict[str, Any]:
     ensure_dirs()
-    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    changed = False
+    defaults = {
+        "mode": "balanced",
+        "protected_paths": default_scan_paths(),
+        "rules": built_in_rules(),
+        "last_scan": None,
+        "realtime_enabled": True,
+        "notifications_enabled": True,
+    }
+    for key, value in defaults.items():
+        if key not in config:
+            config[key] = value
+            changed = True
+    if changed:
+        save_config(config)
+    return config
 
 
 def save_config(config: dict[str, Any]) -> None:
@@ -163,6 +186,24 @@ def log_activity(kind: str, title: str, detail: str, risk: str = "low", extra: d
     }
     with ACTIVITY_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event) + "\n")
+
+
+def notify_user(title: str, message: str, risk: str = "medium") -> None:
+    try:
+        if not load_config().get("notifications_enabled", True):
+            return
+        if risk_rank(risk) < risk_rank("high"):
+            return
+        safe_title = title.replace("'", "''")[:80]
+        safe_message = message.replace("'", "''")[:260]
+        script = f"$ws=New-Object -ComObject WScript.Shell; $null=$ws.Popup('{safe_message}', 8, '{safe_title}', 48)"
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
 
 
 def recent_activity(limit: int = 50) -> list[dict[str, Any]]:
@@ -342,7 +383,93 @@ def scan_path(target: str) -> dict[str, Any]:
         "high" if risk_rank(worst) >= 3 else "medium" if risky else "low",
         {"target": summary["target"], "counts": counts},
     )
+    if risky and risk_rank(worst) >= 3:
+        notify_user("ClearGuard warning", f"{len(risky)} risky file(s) found in {summary['target']}.", worst)
     return summary
+
+
+def load_seen_files() -> dict[str, float]:
+    if not SEEN_PATH.exists():
+        return {}
+    try:
+        return json.loads(SEEN_PATH.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_seen_files(seen: dict[str, float]) -> None:
+    SEEN_PATH.write_text(json.dumps(seen), encoding="utf-8")
+
+
+def monitored_files(paths: list[str]) -> list[Path]:
+    files: list[Path] = []
+    for raw_path in paths:
+        root = Path(raw_path).expanduser()
+        if not root.exists():
+            continue
+        if root.is_file():
+            files.append(root)
+            continue
+        for current_root, dirs, names in os.walk(root):
+            dirs[:] = [name for name in dirs if name.lower() not in {"node_modules", ".git", ".venv", "venv", "__pycache__"}]
+            for name in names:
+                files.append(Path(current_root) / name)
+                if len(files) >= MONITOR_PASS_LIMIT:
+                    return files
+    return files
+
+
+def monitor_once() -> None:
+    config = load_config()
+    if not config.get("realtime_enabled", True):
+        return
+    seen = load_seen_files()
+    changed = False
+    files = monitored_files(config.get("protected_paths", []))
+    if not SEEN_PATH.exists():
+        for path in files:
+            try:
+                seen[str(path.resolve())] = path.stat().st_mtime
+            except OSError:
+                continue
+        save_seen_files(dict(list(seen.items())[-5000:]))
+        log_activity("realtime", "Realtime monitor baseline created", f"Watching {len(seen)} existing file(s) for future changes.", "low")
+        return
+    for path in files:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        key = str(path.resolve())
+        fingerprint = stat.st_mtime
+        if seen.get(key) == fingerprint:
+            continue
+        seen[key] = fingerprint
+        changed = True
+        result = scan_file(path)
+        if risk_rank(result["risk"]) >= risk_rank("high"):
+            detail = "; ".join(result["findings"])
+            log_activity("realtime", f"Risky file changed: {path.name}", detail, result["risk"], {"path": str(path)})
+            notify_user("ClearGuard blocked a risky-looking download", f"{path.name}: {detail}", result["risk"])
+    if changed:
+        save_seen_files(dict(list(seen.items())[-5000:]))
+
+
+def monitor_loop() -> None:
+    while True:
+        try:
+            monitor_once()
+        except Exception as exc:
+            log_activity("realtime", "Realtime monitor error", str(exc), "medium")
+        time.sleep(MONITOR_INTERVAL_SECONDS)
+
+
+def start_monitor() -> None:
+    global MONITOR_STARTED
+    if MONITOR_STARTED:
+        return
+    MONITOR_STARTED = True
+    threading.Thread(target=monitor_loop, name="ClearGuardRealtimeMonitor", daemon=True).start()
 
 
 def quarantine_index_path() -> Path:
@@ -435,6 +562,16 @@ def is_admin() -> bool:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
+
+
+def persistence_installed() -> bool:
+    completed = subprocess.run(
+        ["schtasks", "/Query", "/TN", "ClearGuard AV Agent"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return completed.returncode == 0
 
 
 def reverse_dns(remote_address: str) -> str | None:
@@ -607,6 +744,24 @@ def block_ip(remote_address: str) -> dict[str, Any]:
     return {"remote_address": remote_address, "rule": rule_name, "output": completed.stdout.strip()}
 
 
+def unblock_rule(rule_name: str) -> dict[str, Any]:
+    if not rule_name:
+        raise ValueError("Firewall rule name is required.")
+    if not is_admin():
+        command = f'netsh advfirewall firewall delete rule name="{rule_name}"'
+        raise PermissionError(f"Unblocking requires administrator rights. Restart ClearGuard as Administrator or run this in an elevated PowerShell: {command}")
+    completed = subprocess.run(
+        ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule_name}"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "Firewall unblock failed.")
+    log_activity("network", f"Removed firewall block rule", rule_name, "medium")
+    return {"rule": rule_name, "output": completed.stdout.strip()}
+
+
 def blocked_ips() -> list[dict[str, Any]]:
     script = r"""
     $rules = Get-NetFirewallRule -ErrorAction SilentlyContinue |
@@ -734,6 +889,9 @@ def status() -> dict[str, Any]:
         "high_network_count": high_network,
         "is_admin": is_admin(),
         "blocked_ip_count": len(blocked_ips()),
+        "realtime_enabled": config.get("realtime_enabled", True),
+        "notifications_enabled": config.get("notifications_enabled", True),
+        "persistence_installed": persistence_installed(),
         "rules": config.get("rules", []),
         "activity": recent_activity(8),
     }
@@ -805,11 +963,22 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
                     config["mode"] = mode
                     save_config(config)
                     log_activity("settings", f"Protection mode changed to {mode}", "User updated local policy.", "low")
+                for key in ("realtime_enabled", "notifications_enabled"):
+                    if key in body:
+                        config[key] = bool(body[key])
+                        save_config(config)
+                        label = key.replace("_", " ")
+                        log_activity("settings", f"{label} {'enabled' if config[key] else 'disabled'}", "User updated local policy.", "low")
                 json_response(self, config)
             elif self.path == "/api/block-ip":
                 json_response(self, block_ip(str(body.get("remote_address", ""))))
+            elif self.path == "/api/unblock-ip":
+                json_response(self, unblock_rule(str(body.get("rule_name", ""))))
             elif self.path == "/api/investigate-url":
                 json_response(self, investigate_url(str(body.get("url", ""))))
+            elif self.path == "/api/test-notification":
+                notify_user("ClearGuard test alert", "Laptop notifications are enabled.", "high")
+                json_response(self, {"ok": True})
             else:
                 json_response(self, {"error": "Not found"}, 404)
         except Exception as exc:
@@ -821,6 +990,7 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
 
 def main() -> None:
     ensure_dirs()
+    start_monitor()
     port = int(os.environ.get("CLEARGUARD_PORT", "5288"))
     server = ThreadingHTTPServer(("127.0.0.1", port), ClearGuardHandler)
     print(f"ClearGuard running at http://127.0.0.1:{port}/console.html")
