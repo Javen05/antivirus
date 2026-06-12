@@ -56,17 +56,31 @@ This creates a Windows Scheduled Task named `ClearGuard AV Agent` that starts th
 
 When the agent is running, ClearGuard can watch protected folders such as Downloads, Desktop, and Documents. High-risk file changes trigger a Windows pop-up alert and an activity entry in the console.
 
+## Browser Website Warnings
+
+ClearGuard includes an unpacked Chrome/Edge extension in `extension/`.
+
+1. Start the ClearGuard local agent.
+2. Open Chrome or Edge extension settings.
+3. Enable Developer mode.
+4. Choose **Load unpacked**.
+5. Select the `extension` folder.
+
+The extension asks `http://127.0.0.1:5288/api/browser-check` to evaluate visited URLs. It can show warning badges, browser notifications, and a local warning interstitial for high-risk domains. It does not upload browsing history to a cloud service.
+
 Limitations in this prototype:
 
 - It is not a kernel driver yet, so it cannot intercept every file before access.
-- Website warnings happen through the safe URL checker and traffic view, not a browser extension yet.
+- Website warnings require loading the included `extension/` folder as an unpacked Chrome/Edge extension.
 - Firewall block/unblock actions require running the agent from an Administrator PowerShell.
 
 ## What Works Now
 
 - Real file and folder scanning.
 - Microsoft Defender custom-scan integration for real malware detection using local Defender definitions.
+- Microsoft Defender definition updates and quick scans from the ClearGuard console.
 - SHA-256 hashing for scanned files.
+- Local SHA-256 and domain blocklists.
 - EICAR antivirus test string recognition for verifying the scanner path only.
 - Script behavior heuristics for encoded PowerShell, remote code download chains, `certutil`, `mshta`, `rundll32`, backup deletion, and Defender-disabling attempts.
 - Risk elevation for executable/script-like files in user-writable launch locations.
@@ -75,6 +89,8 @@ Limitations in this prototype:
 - Risk labeling for outbound connections from commonly abused Windows tools.
 - Optional Windows Firewall outbound block rule creation for a remote IP.
 - Safe URL investigation through parsing, DNS resolution, and local red-flag checks.
+- Startup persistence audit across Run keys, Startup folders, and scheduled tasks.
+- Unpacked Chrome/Edge extension for website warning badges and browser notifications.
 - Persistent local settings, rules, activity log, and quarantine index under `.clearguard/`.
 
 ## Website vs Local App

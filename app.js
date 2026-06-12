@@ -3,6 +3,7 @@ const titles = {
   scanner: "Scanner",
   traffic: "Traffic",
   quarantine: "Quarantine",
+  startup: "Startup audit",
   rules: "Rules",
   learn: "Learn"
 };
@@ -54,7 +55,11 @@ function switchView(view) {
 
   if (view === "traffic") refreshTraffic();
   if (view === "quarantine") refreshQuarantine();
-  if (view === "rules") renderRules(currentStatus?.rules || []);
+  if (view === "startup") refreshStartup();
+  if (view === "rules") {
+    renderRules(currentStatus?.rules || []);
+    refreshBlocklists();
+  }
 }
 
 function setMode(mode) {
@@ -158,7 +163,7 @@ async function refreshStatus() {
 async function runScan(path) {
   const summary = qs("#scanSummary");
   const findings = qs("#scanFindings");
-  summary.textContent = "Scanning real files...";
+  summary.textContent = "Scanning files...";
   findings.replaceChildren();
   try {
     const result = await api("/api/scan", {
@@ -352,6 +357,74 @@ async function refreshQuarantine() {
   }
 }
 
+async function refreshStartup() {
+  const list = qs("#startupList");
+  empty(list, "Auditing registry Run keys, Startup folders, and scheduled tasks...");
+  try {
+    const rows = await api("/api/startup-audit");
+    if (!rows.length) {
+      empty(list, "No enabled startup entries found.");
+      return;
+    }
+    list.replaceChildren();
+    rows.forEach((row) => {
+      const article = document.createElement("article");
+      article.className = `finding-item ${riskClass(row.risk)}`;
+      article.innerHTML = `
+        <div>
+          <h4></h4>
+          <p></p>
+          <small></small>
+        </div>
+      `;
+      qs("h4", article).textContent = `${row.risk.toUpperCase()} - ${row.name}`;
+      qs("p", article).textContent = row.findings.join(" ");
+      qs("small", article).textContent = `${row.type} - ${row.location} - ${row.command}`;
+      list.append(article);
+    });
+  } catch (error) {
+    empty(list, error.message);
+  }
+}
+
+async function refreshBlocklists() {
+  const list = qs("#blocklistList");
+  try {
+    const data = await api("/api/blocklists");
+    const rows = [
+      ...(data.blocked_domains || []).map((value) => ({ type: "Domain", value, endpoint: "/api/unblock-domain", key: "domain" })),
+      ...(data.blocked_hashes || []).map((value) => ({ type: "SHA-256", value, endpoint: "/api/unblock-hash", key: "sha256" }))
+    ];
+    if (!rows.length) {
+      empty(list, "No local domains or hashes are blocked.");
+      return;
+    }
+    list.replaceChildren();
+    rows.forEach((row) => {
+      const article = document.createElement("article");
+      article.className = "rule-item";
+      article.innerHTML = `
+        <div>
+          <h4></h4>
+          <p></p>
+          <small></small>
+        </div>
+        <button class="secondary-action" type="button">Remove</button>
+      `;
+      qs("h4", article).textContent = row.value;
+      qs("p", article).textContent = row.type;
+      qs("small", article).textContent = "Local ClearGuard blocklist";
+      qs("button", article).addEventListener("click", async () => {
+        await api(row.endpoint, { method: "POST", body: JSON.stringify({ [row.key]: row.value }) });
+        await refreshBlocklists();
+      });
+      list.append(article);
+    });
+  } catch (error) {
+    empty(list, error.message);
+  }
+}
+
 async function quarantineAction(id, action) {
   await api(`/api/quarantine/${encodeURIComponent(id)}`, {
     method: "POST",
@@ -389,6 +462,25 @@ async function updateSetting(key, value) {
   await refreshStatus();
 }
 
+async function defenderAction(endpoint, label) {
+  const box = qs("#urlResult");
+  box.textContent = `${label}...`;
+  try {
+    const result = await api(endpoint, { method: "POST", body: JSON.stringify({}) });
+    box.textContent = `${label} finished. ${result.detection_count ?? 0} detection(s).`;
+    await refreshStatus();
+  } catch (error) {
+    box.textContent = error.message;
+  }
+}
+
+async function addBlocklistItem(endpoint, payload, input) {
+  await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
+  input.value = "";
+  await refreshBlocklists();
+  await refreshStatus();
+}
+
 qsa(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
 qsa(".mode-button").forEach((button) => {
   button.addEventListener("click", async () => {
@@ -402,6 +494,7 @@ qs("#scanPathButton").addEventListener("click", () => runScan(qs("#scanPath").va
 qs("#refreshTraffic").addEventListener("click", refreshTraffic);
 qs("#refreshBlocked").addEventListener("click", refreshBlocked);
 qs("#refreshQuarantine").addEventListener("click", refreshQuarantine);
+qs("#refreshStartup").addEventListener("click", refreshStartup);
 qs("#checkUrl").addEventListener("click", checkUrl);
 qs("#defenderToggle").addEventListener("change", (event) => updateSetting("defender_enabled", event.target.checked));
 qs("#realtimeToggle").addEventListener("change", (event) => updateSetting("realtime_enabled", event.target.checked));
@@ -412,6 +505,16 @@ qs("#testNotification").addEventListener("click", async () => {
   } catch (error) {
     window.alert(error.message);
   }
+});
+qs("#updateDefender").addEventListener("click", () => defenderAction("/api/defender-update", "Updating Defender definitions"));
+qs("#quickScan").addEventListener("click", () => defenderAction("/api/defender-quick-scan", "Running Defender quick scan"));
+qs("#addDomain").addEventListener("click", () => {
+  const input = qs("#domainInput");
+  addBlocklistItem("/api/block-domain", { domain: input.value.trim() }, input);
+});
+qs("#addHash").addEventListener("click", () => {
+  const input = qs("#hashInput");
+  addBlocklistItem("/api/block-hash", { sha256: input.value.trim() }, input);
 });
 
 refreshStatus();

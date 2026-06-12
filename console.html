@@ -22,6 +22,7 @@
           <button class="nav-item" data-view="scanner" type="button"><span aria-hidden="true">S</span>Scanner</button>
           <button class="nav-item" data-view="traffic" type="button"><span aria-hidden="true">T</span>Traffic</button>
           <button class="nav-item" data-view="quarantine" type="button"><span aria-hidden="true">Q</span>Quarantine</button>
+          <button class="nav-item" data-view="startup" type="button"><span aria-hidden="true">A</span>Startup audit</button>
           <button class="nav-item" data-view="rules" type="button"><span aria-hidden="true">R</span>Rules</button>
           <button class="nav-item" data-view="learn" type="button"><span aria-hidden="true">?</span>Learn</button>
         </nav>
@@ -107,6 +108,8 @@
               </div>
               <div class="decision-actions">
                 <button class="secondary-action" id="testNotification" type="button">Test notification</button>
+                <button class="secondary-action" id="updateDefender" type="button">Update Defender</button>
+                <button class="secondary-action" id="quickScan" type="button">Quick scan</button>
               </div>
               <hr>
               <p class="eyebrow">Safe investigation</p>
@@ -187,6 +190,19 @@
           </section>
         </section>
 
+        <section class="view" id="startup" aria-labelledby="viewTitle">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Persistence audit</p>
+                <h3>Apps that start automatically</h3>
+              </div>
+              <button class="secondary-action" id="refreshStartup" type="button">Audit startup</button>
+            </div>
+            <div class="findings-list" id="startupList"></div>
+          </section>
+        </section>
+
         <section class="view" id="rules" aria-labelledby="viewTitle">
           <section class="panel">
             <div class="section-head">
@@ -196,6 +212,21 @@
               </div>
             </div>
             <div class="rules-list" id="rulesList"></div>
+            <div class="section-head subhead">
+              <div>
+                <p class="eyebrow">Local blocklists</p>
+                <h3>Known-bad domains and hashes</h3>
+              </div>
+            </div>
+            <div class="input-row wide">
+              <input id="domainInput" type="text" placeholder="malicious.example">
+              <button class="primary-action" id="addDomain" type="button">Block domain</button>
+            </div>
+            <div class="input-row wide">
+              <input id="hashInput" type="text" placeholder="SHA-256 hash">
+              <button class="primary-action" id="addHash" type="button">Block hash</button>
+            </div>
+            <div class="rules-list" id="blocklistList"></div>
           </section>
         </section>
 

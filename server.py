@@ -114,6 +114,11 @@ def ensure_dirs() -> None:
                 "realtime_enabled": True,
                 "notifications_enabled": True,
                 "defender_enabled": True,
+                "blocked_hashes": [],
+                "blocked_domains": [
+                    "malware.test",
+                    "phishing.test"
+                ],
             }
         )
 
@@ -161,6 +166,11 @@ def load_config() -> dict[str, Any]:
         "realtime_enabled": True,
         "notifications_enabled": True,
         "defender_enabled": True,
+        "blocked_hashes": [],
+        "blocked_domains": [
+            "malware.test",
+            "phishing.test"
+        ],
     }
     for key, value in defaults.items():
         if key not in config:
@@ -323,11 +333,71 @@ def defender_scan_target(target: Path) -> dict[str, Any]:
     ]
     return {
         "available": True,
-        "ok": completed.returncode == 0,
+        "ok": completed.returncode == 0 or "scan is already in progress" in completed.stderr.lower(),
         "duration_seconds": round(time.time() - started_at, 2),
         "error": completed.stderr.strip() if completed.returncode else "",
         "detections": new_or_matching,
         "new_detection_count": len(after_keys - before),
+    }
+
+
+def defender_update_signatures() -> dict[str, Any]:
+    started_at = time.time()
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Update-MpSignature -ErrorAction Stop"],
+        capture_output=True,
+        text=True,
+        timeout=240,
+    )
+    status_after = defender_status()
+    ok = completed.returncode == 0
+    log_activity(
+        "defender",
+        "Defender definitions update completed" if ok else "Defender definitions update failed",
+        completed.stderr.strip() or completed.stdout.strip() or f"Definitions: {status_after.get('AntivirusSignatureVersion', 'unknown')}",
+        "low" if ok else "medium",
+    )
+    return {
+        "ok": ok,
+        "duration_seconds": round(time.time() - started_at, 2),
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+        "status": status_after,
+    }
+
+
+def defender_quick_scan() -> dict[str, Any]:
+    status_before = defender_status()
+    if not status_before.get("Available") or not status_before.get("AntivirusEnabled"):
+        raise RuntimeError(status_before.get("Error") or "Microsoft Defender antivirus is not enabled.")
+    before = detection_keys(defender_threat_detections())
+    started_at = time.time()
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Start-MpScan -ScanType QuickScan -ErrorAction Stop"],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    detections = defender_threat_detections()
+    new_keys = detection_keys(detections) - before
+    new_detections = [item for item in detections if detection_key(item) in new_keys]
+    ok = completed.returncode == 0
+    risk = "critical" if new_detections else "low" if ok else "medium"
+    log_activity(
+        "defender",
+        "Defender quick scan completed" if ok else "Defender quick scan failed",
+        f"{len(new_detections)} new Defender detection(s).",
+        risk,
+    )
+    if new_detections:
+        notify_user("ClearGuard malware warning", f"Microsoft Defender found {len(new_detections)} new threat(s).", "critical")
+    return {
+        "ok": ok,
+        "duration_seconds": round(time.time() - started_at, 2),
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+        "new_detections": new_detections,
+        "detection_count": len(new_detections),
     }
 
 
@@ -424,10 +494,16 @@ def scan_file(path: Path) -> dict[str, Any]:
         sample_entropy = entropy(data[:1024 * 1024])
         result["sha256"] = sha256_file(path)
         dependency_file = is_dependency_file(path)
+        blocked_hashes = {str(item).lower() for item in load_config().get("blocked_hashes", [])}
+
+        if result["sha256"] and result["sha256"].lower() in blocked_hashes:
+            result["risk"] = "critical"
+            result["findings"].append("SHA-256 hash is on the local ClearGuard blocklist.")
+            result.setdefault("sources", []).append("ClearGuard hash blocklist")
 
         if EICAR in data:
             result["risk"] = "critical"
-            result["findings"].append("Matched EICAR antivirus test signature.")
+            result["findings"].append("Matched EICAR antivirus test string. This verifies scanner plumbing; it is not real malware.")
 
         if ext in SUSPICIOUS_EXTENSIONS and not dependency_file:
             result["risk"] = max(result["risk"], "medium", key=risk_rank)
@@ -963,6 +1039,98 @@ def blocked_ips() -> list[dict[str, Any]]:
     return results
 
 
+def startup_audit() -> list[dict[str, Any]]:
+    script = r"""
+    $items = @()
+    $runKeys = @(
+      'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
+      'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run',
+      'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce',
+      'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+    )
+    foreach ($key in $runKeys) {
+      if (Test-Path $key) {
+        $props = Get-ItemProperty -Path $key
+        foreach ($prop in $props.PSObject.Properties) {
+          if ($prop.Name -notmatch '^PS') {
+            $items += [PSCustomObject]@{
+              Type='Registry Run'
+              Name=$prop.Name
+              Command=[string]$prop.Value
+              Location=$key
+            }
+          }
+        }
+      }
+    }
+    $startupFolders = @(
+      [Environment]::GetFolderPath('Startup'),
+      "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp"
+    )
+    foreach ($folder in $startupFolders) {
+      if (Test-Path $folder) {
+        Get-ChildItem -Path $folder -File -ErrorAction SilentlyContinue | ForEach-Object {
+          $items += [PSCustomObject]@{
+            Type='Startup Folder'
+            Name=$_.Name
+            Command=$_.FullName
+            Location=$folder
+          }
+        }
+      }
+    }
+    Get-ScheduledTask -ErrorAction SilentlyContinue |
+      Where-Object { $_.State -ne 'Disabled' } |
+      Select-Object -First 100 |
+      ForEach-Object {
+        $actionText = ($_.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join '; '
+        $items += [PSCustomObject]@{
+          Type='Scheduled Task'
+          Name=$_.TaskName
+          Command=$actionText
+          Location=$_.TaskPath
+        }
+      }
+    $items | ConvertTo-Json -Depth 4
+    """
+    try:
+        rows = powershell_json(script, timeout=25)
+    except Exception as exc:
+        log_activity("startup", "Could not audit startup items", str(exc), "medium")
+        return []
+    results = []
+    for row in rows:
+        command = str(row.get("Command") or "")
+        location = str(row.get("Location") or "")
+        risk = "low"
+        findings = ["Startup entry is enabled."]
+        lowered = command.lower()
+        trusted_windows_task = location.lower().startswith("\\microsoft\\windows\\") or "%windir%\\system32" in lowered or "\\windows\\system32" in lowered
+        if any(token in lowered for token in ["powershell", "wscript", "cscript", "mshta", "regsvr32"]):
+            risk = "high"
+            findings.append("Uses a script or living-off-the-land Windows tool often abused for persistence.")
+        elif "rundll32" in lowered:
+            risk = "low" if trusted_windows_task else "high"
+            findings.append("Uses rundll32. This is common for Windows tasks but suspicious from unknown locations.")
+        if any(token in lowered for token in ["\\appdata\\", "\\temp\\", "\\downloads\\"]):
+            risk = max(risk, "medium", key=risk_rank)
+            findings.append("Launches from a user-writable location.")
+        if "-enc" in lowered or "encodedcommand" in lowered:
+            risk = "high"
+            findings.append("Uses encoded command arguments.")
+        results.append(
+            {
+                "type": row.get("Type"),
+                "name": row.get("Name"),
+                "command": command,
+                "location": location,
+                "risk": risk,
+                "findings": findings,
+            }
+        )
+    return sorted(results, key=lambda item: risk_rank(item["risk"]), reverse=True)
+
+
 def investigate_url(raw_url: str) -> dict[str, Any]:
     if not raw_url:
         raise ValueError("URL is required.")
@@ -972,8 +1140,13 @@ def investigate_url(raw_url: str) -> dict[str, Any]:
     host = parsed.hostname
     findings = []
     risk = "low"
+    blocked_domains = {str(item).lower().strip() for item in load_config().get("blocked_domains", [])}
+    host_lower = host.lower()
+    if host_lower in blocked_domains or any(host_lower.endswith("." + domain) for domain in blocked_domains):
+        risk = "critical"
+        findings.append("Domain is on the local ClearGuard blocklist.")
     if parsed.scheme == "http":
-        risk = "medium"
+        risk = max(risk, "medium", key=risk_rank)
         findings.append("Site uses unencrypted HTTP.")
     if "@" in raw_url:
         risk = "high"
@@ -981,6 +1154,15 @@ def investigate_url(raw_url: str) -> dict[str, Any]:
     if len(host) > 60 or host.count("-") >= 4:
         risk = max(risk, "medium", key=risk_rank)
         findings.append("Hostname shape is unusual.")
+    if re.search(r"(login|verify|account|secure|wallet|bank).*\d{2,}", host_lower):
+        risk = max(risk, "high", key=risk_rank)
+        findings.append("Hostname mixes sensitive words with numbers, a common phishing pattern.")
+    try:
+        ipaddress.ip_address(host)
+        risk = max(risk, "medium", key=risk_rank)
+        findings.append("URL uses a raw IP address instead of a named domain.")
+    except ValueError:
+        pass
     try:
         ascii_host = host.encode("idna").decode("ascii")
         if ascii_host != host:
@@ -1061,6 +1243,9 @@ def json_response(handler: SimpleHTTPRequestHandler, payload: Any, status_code: 
     data = json.dumps(payload).encode("utf-8")
     handler.send_response(status_code)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
@@ -1076,6 +1261,13 @@ def read_json(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
 class ClearGuardHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(ROOT), **kwargs)
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.end_headers()
 
     def do_GET(self) -> None:
         try:
@@ -1095,6 +1287,11 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
                 json_response(self, blocked_ips())
             elif self.path == "/api/rules":
                 json_response(self, load_config().get("rules", []))
+            elif self.path == "/api/blocklists":
+                config = load_config()
+                json_response(self, {"blocked_domains": config.get("blocked_domains", []), "blocked_hashes": config.get("blocked_hashes", [])})
+            elif self.path == "/api/startup-audit":
+                json_response(self, startup_audit())
             else:
                 super().do_GET()
         except Exception as exc:
@@ -1136,6 +1333,48 @@ class ClearGuardHandler(SimpleHTTPRequestHandler):
                 json_response(self, unblock_rule(str(body.get("rule_name", ""))))
             elif self.path == "/api/investigate-url":
                 json_response(self, investigate_url(str(body.get("url", ""))))
+            elif self.path == "/api/browser-check":
+                json_response(self, investigate_url(str(body.get("url", ""))))
+            elif self.path == "/api/defender-update":
+                json_response(self, defender_update_signatures())
+            elif self.path == "/api/defender-quick-scan":
+                json_response(self, defender_quick_scan())
+            elif self.path == "/api/block-domain":
+                domain = str(body.get("domain", "")).strip().lower()
+                if not domain:
+                    raise ValueError("Domain is required.")
+                config = load_config()
+                domains = set(config.get("blocked_domains", []))
+                domains.add(domain)
+                config["blocked_domains"] = sorted(domains)
+                save_config(config)
+                log_activity("settings", f"Blocked domain {domain}", "Added to local ClearGuard domain blocklist.", "medium")
+                json_response(self, {"blocked_domains": config["blocked_domains"]})
+            elif self.path == "/api/block-hash":
+                file_hash = str(body.get("sha256", "")).strip().lower()
+                if not re.fullmatch(r"[a-f0-9]{64}", file_hash):
+                    raise ValueError("A valid SHA-256 hash is required.")
+                config = load_config()
+                hashes = set(config.get("blocked_hashes", []))
+                hashes.add(file_hash)
+                config["blocked_hashes"] = sorted(hashes)
+                save_config(config)
+                log_activity("settings", f"Blocked hash {file_hash[:12]}", "Added to local ClearGuard hash blocklist.", "medium")
+                json_response(self, {"blocked_hashes": config["blocked_hashes"]})
+            elif self.path == "/api/unblock-domain":
+                domain = str(body.get("domain", "")).strip().lower()
+                config = load_config()
+                config["blocked_domains"] = [item for item in config.get("blocked_domains", []) if item != domain]
+                save_config(config)
+                log_activity("settings", f"Removed blocked domain {domain}", "Removed from local ClearGuard domain blocklist.", "low")
+                json_response(self, {"blocked_domains": config["blocked_domains"]})
+            elif self.path == "/api/unblock-hash":
+                file_hash = str(body.get("sha256", "")).strip().lower()
+                config = load_config()
+                config["blocked_hashes"] = [item for item in config.get("blocked_hashes", []) if item != file_hash]
+                save_config(config)
+                log_activity("settings", f"Removed blocked hash {file_hash[:12]}", "Removed from local ClearGuard hash blocklist.", "low")
+                json_response(self, {"blocked_hashes": config["blocked_hashes"]})
             elif self.path == "/api/test-notification":
                 notify_user("ClearGuard test alert", "Laptop notifications are enabled.", "high")
                 json_response(self, {"ok": True})

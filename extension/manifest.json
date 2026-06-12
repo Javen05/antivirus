@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "ClearGuard Web Shield",
+  "version": "0.1.0",
+  "description": "Warns when the local ClearGuard agent sees risky website indicators.",
+  "permissions": ["tabs", "notifications", "storage"],
+  "host_permissions": ["<all_urls>", "http://127.0.0.1:5288/*"],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "icons": {
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "ClearGuard Web Shield",
+    "default_icon": {
+      "128": "icons/icon128.png"
+    },
+    "default_popup": "popup.html"
+  }
+}
