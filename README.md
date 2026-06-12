@@ -1,6 +1,6 @@
 # ClearGuard
 
-ClearGuard is a local, layperson-readable Windows security console. It scans real files, tracks quarantine, shows live outbound TCP connections, and explains local security decisions in plain English.
+ClearGuard is a local, layperson-readable Windows security console. It scans real files, tracks quarantine, shows live outbound TCP connections, and explains local security decisions with minimal jargon.
 
 ## Customer Download
 
