@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ClearGuard AV</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="ClearGuard sections">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">CG</div>
+          <div>
+            <h1>ClearGuard</h1>
+            <p>Local security console</p>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="Primary">
+          <button class="nav-item active" data-view="overview" type="button"><span aria-hidden="true">O</span>Overview</button>
+          <button class="nav-item" data-view="scanner" type="button"><span aria-hidden="true">S</span>Scanner</button>
+          <button class="nav-item" data-view="traffic" type="button"><span aria-hidden="true">T</span>Traffic</button>
+          <button class="nav-item" data-view="quarantine" type="button"><span aria-hidden="true">Q</span>Quarantine</button>
+          <button class="nav-item" data-view="rules" type="button"><span aria-hidden="true">R</span>Rules</button>
+          <button class="nav-item" data-view="learn" type="button"><span aria-hidden="true">?</span>Learn</button>
+        </nav>
+
+        <section class="trust-panel" aria-label="Protection status">
+          <p class="eyebrow">Protection score</p>
+          <div class="trust-score"><span id="trustScore">--</span>%</div>
+          <p id="trustCopy">Connecting to the local agent...</p>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">User-mode security agent</p>
+            <h2 id="viewTitle">Overview</h2>
+          </div>
+          <div class="mode-control" aria-label="Protection mode">
+            <button class="mode-button" data-mode="quiet" type="button">Quiet</button>
+            <button class="mode-button" data-mode="balanced" type="button">Balanced</button>
+            <button class="mode-button" data-mode="strict" type="button">Strict</button>
+          </div>
+        </header>
+
+        <section class="view active" id="overview" aria-labelledby="viewTitle">
+          <div class="status-grid">
+            <article class="status-tile">
+              <div class="tile-icon" aria-hidden="true">F</div>
+              <div>
+                <h3>File risk</h3>
+                <p id="fileStatus">No scan has run yet.</p>
+              </div>
+            </article>
+            <article class="status-tile">
+              <div class="tile-icon" aria-hidden="true">N</div>
+              <div>
+                <h3>Traffic</h3>
+                <p id="networkStatus">Reading live TCP connections...</p>
+              </div>
+            </article>
+            <article class="status-tile">
+              <div class="tile-icon" aria-hidden="true">Q</div>
+              <div>
+                <h3>Quarantine</h3>
+                <p id="quarantineStatus">No files contained.</p>
+              </div>
+            </article>
+          </div>
+
+          <section class="panel split-panel">
+            <div>
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Live agent log</p>
+                  <h3>Recent activity</h3>
+                </div>
+                <button class="icon-button" id="refreshOverview" type="button" title="Refresh" aria-label="Refresh">R</button>
+              </div>
+              <div class="activity-list" id="activityList" aria-live="polite"></div>
+            </div>
+            <aside class="decision-card">
+              <p class="eyebrow">Safe investigation</p>
+              <h3>Check a suspicious site</h3>
+              <p>Resolve and inspect a URL for local red flags without attacking the site or sending credentials.</p>
+              <div class="input-row">
+                <input id="urlInput" type="url" placeholder="https://example.com">
+                <button class="primary-action" id="checkUrl" type="button">Check</button>
+              </div>
+              <div class="result-box" id="urlResult"></div>
+            </aside>
+          </section>
+        </section>
+
+        <section class="view" id="scanner" aria-labelledby="viewTitle">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Real file scanning</p>
+                <h3>Scan files or folders</h3>
+              </div>
+              <button class="secondary-action" id="scanDefault" type="button">Scan default folder</button>
+            </div>
+            <div class="input-row wide">
+              <input id="scanPath" type="text" placeholder="C:\Users\you\Downloads">
+              <button class="primary-action" id="scanPathButton" type="button">Scan path</button>
+            </div>
+            <div class="result-box" id="scanSummary"></div>
+            <div class="findings-list" id="scanFindings"></div>
+          </section>
+        </section>
+
+        <section class="view" id="traffic" aria-labelledby="viewTitle">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Live traffic visibility</p>
+                <h3>Outbound connections</h3>
+              </div>
+              <button class="secondary-action" id="refreshTraffic" type="button">Refresh traffic</button>
+            </div>
+            <div class="result-box" id="trafficHelp">Loading traffic context...</div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Risk</th>
+                    <th>Process</th>
+                    <th>Destination</th>
+                    <th>Plain-English explanation</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="trafficTable"></tbody>
+              </table>
+            </div>
+            <div class="section-head subhead">
+              <div>
+                <p class="eyebrow">Windows Firewall</p>
+                <h3>Existing outbound IP blocks</h3>
+              </div>
+              <button class="secondary-action" id="refreshBlocked" type="button">Refresh blocked IPs</button>
+            </div>
+            <div class="rules-list" id="blockedList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="quarantine" aria-labelledby="viewTitle">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Contained files</p>
+                <h3>Quarantine</h3>
+              </div>
+              <button class="secondary-action" id="refreshQuarantine" type="button">Refresh</button>
+            </div>
+            <div class="quarantine-list" id="quarantineList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="rules" aria-labelledby="viewTitle">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Detection policy</p>
+                <h3>Active built-in rules</h3>
+              </div>
+            </div>
+            <div class="rules-list" id="rulesList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="learn" aria-labelledby="viewTitle">
+          <section class="panel learn-grid">
+            <article>
+              <p class="eyebrow">What runs today</p>
+              <h3>User-mode agent</h3>
+              <p>This build scans real files, tracks quarantine, reads live TCP connections, and explains risk locally.</p>
+            </article>
+            <article>
+              <p class="eyebrow">What comes next</p>
+              <h3>Kernel sensor</h3>
+              <p>Industry endpoint protection adds signed minifilter, process, registry, and WFP drivers after the policy engine is stable.</p>
+            </article>
+            <article>
+              <p class="eyebrow">Safe investigation</p>
+              <h3>Defensive only</h3>
+              <p>ClearGuard can inspect, explain, quarantine, and block. It does not attack sites, bypass access controls, or exploit traffic.</p>
+            </article>
+            <article>
+              <p class="eyebrow">Moat</p>
+              <h3>Human-readable control</h3>
+              <p>The product wedge is security decisions normal people can understand, with expert-grade telemetry behind the scenes.</p>
+            </article>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

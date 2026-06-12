@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ClearGuard AV - Antivirus normal people can control</title>
+    <meta
+      name="description"
+      content="ClearGuard is a local Windows antivirus console that explains scans, quarantine, and network traffic in plain English."
+    >
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body class="landing-body">
+    <header class="landing-nav">
+      <a class="landing-brand" href="index.html" aria-label="ClearGuard home">
+        <span class="brand-mark" aria-hidden="true">CG</span>
+        <span>ClearGuard</span>
+      </a>
+      <nav aria-label="Landing navigation">
+        <a href="#download">Download</a>
+        <a href="#features">Features</a>
+        <a href="#run">Run it</a>
+        <a href="https://github.com/Javen05/antivirus">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="landing-hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Local-first Windows security</p>
+          <h1>Antivirus normal people can actually understand.</h1>
+          <p>
+            ClearGuard turns file scans, quarantine, and live network traffic into plain-English decisions:
+            what happened, why it matters, and what to do next.
+          </p>
+          <div class="hero-actions" id="download">
+            <a class="primary-link" href="https://github.com/Javen05/antivirus/archive/refs/heads/main.zip">Download ZIP</a>
+            <a class="secondary-link" href="https://github.com/Javen05/antivirus">View on GitHub</a>
+          </div>
+          <p class="hero-note">Prototype build. Runs locally on Windows with Python 3. No file cloud upload required.</p>
+        </div>
+
+        <div class="hero-product" aria-label="ClearGuard product preview">
+          <div class="product-top">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div class="product-score">
+            <p class="eyebrow">Protection score</p>
+            <strong>90%</strong>
+            <span>Healthy. No urgent local signal is dominating risk.</span>
+          </div>
+          <div class="product-list">
+            <article>
+              <b>Traffic</b>
+              <span>Chrome to Google service - normal browser/web traffic.</span>
+            </article>
+            <article>
+              <b>Scanner</b>
+              <span>Suspicious script pattern - quarantine recommended.</span>
+            </article>
+            <article>
+              <b>Firewall</b>
+              <span>Existing outbound IP blocks shown in one place.</span>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="landing-band" id="features">
+        <div class="landing-section-head">
+          <p class="eyebrow">What customers get</p>
+          <h2>Security controls without security jargon.</h2>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <h3>Plain-English file scanning</h3>
+            <p>Scans real files and explains suspicious scripts, executable locations, hashes, and quarantine options.</p>
+          </article>
+          <article>
+            <h3>Live traffic visibility</h3>
+            <p>Shows outbound connections by app, destination, and risk so users can tell normal browsing from strange behavior.</p>
+          </article>
+          <article>
+            <h3>Quarantine and recovery</h3>
+            <p>Moves suspicious files into a controlled quarantine with restore/delete metadata and audit history.</p>
+          </article>
+          <article>
+            <h3>Firewall awareness</h3>
+            <p>Lists existing outbound IP blocks and can create new Windows Firewall blocks when run as Administrator.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="landing-band alt" id="run">
+        <div class="landing-section-head">
+          <p class="eyebrow">How to run it</p>
+          <h2>Download. Start the agent. Open the console.</h2>
+        </div>
+        <div class="steps-grid">
+          <article>
+            <span>1</span>
+            <h3>Install Python 3</h3>
+            <p>ClearGuard runs as a local Python agent on Windows. Python 3.11+ is recommended.</p>
+          </article>
+          <article>
+            <span>2</span>
+            <h3>Start ClearGuard</h3>
+            <p>Run <code>scripts\start-clearguard.ps1</code> from PowerShell, or run <code>python server.py</code>.</p>
+          </article>
+          <article>
+            <span>3</span>
+            <h3>Open the console</h3>
+            <p>Go to <code>http://127.0.0.1:5288/console.html</code> to scan files and review live traffic.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="landing-cta">
+        <div>
+          <p class="eyebrow">For early adopters</p>
+          <h2>Try ClearGuard on a Windows test machine.</h2>
+          <p>
+            This build is a prototype local AV agent. It is defensive-only: it helps users inspect, explain,
+            quarantine, restore, delete, and block. It does not exploit or attack third-party systems.
+          </p>
+        </div>
+        <a class="primary-link" href="https://github.com/Javen05/antivirus/archive/refs/heads/main.zip">Download ClearGuard</a>
+      </section>
+    </main>
+
+    <footer class="landing-footer">
+      <span>ClearGuard AV</span>
+      <a href="https://github.com/Javen05/antivirus">GitHub</a>
+    </footer>
+  </body>
+</html>
